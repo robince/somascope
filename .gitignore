@@ -1,0 +1,12 @@
+/.DS_Store
+/dist/
+/coverage/
+/extern/
+/frontend/dist/
+/frontend/node_modules/
+/frontend/.svelte-kit/
+/frontend/.vite/
+/tmp/
+/.tmp-data/
+/somascope
+*.log

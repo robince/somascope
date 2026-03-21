@@ -1,0 +1,29 @@
+:root {
+  color-scheme: light;
+  --bg: #efe7d5;
+  --panel: rgba(255, 250, 240, 0.86);
+  --ink: #182019;
+  --muted: #5b6d63;
+  --line: rgba(28, 58, 52, 0.14);
+  --accent: #1a6a72;
+  --accent-soft: rgba(26, 106, 114, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(26, 106, 114, 0.18), transparent 28%),
+    radial-gradient(circle at 100% 0%, rgba(170, 112, 44, 0.14), transparent 20%),
+    linear-gradient(180deg, #f5eedf 0%, var(--bg) 100%);
+}
+
+button {
+  font: inherit;
+}
