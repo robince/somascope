@@ -333,9 +333,8 @@
                 <span class="field-label">Notes</span>
                 <textarea
                   rows="3"
-                  value={provider.notes}
                   oninput={(event) => updateProvider(index, "notes", (event.currentTarget as HTMLTextAreaElement).value)}
-                />
+                >{provider.notes}</textarea>
               </label>
             </div>
           </article>
@@ -404,7 +403,7 @@
   h1 {
     margin: 0;
     max-width: 12ch;
-    font-size: clamp(3rem, 7vw, 4.8rem);
+    font-size: clamp(1.9rem, 4.1vw, 3rem);
     line-height: 0.92;
   }
 

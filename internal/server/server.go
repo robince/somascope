@@ -161,7 +161,7 @@ func (s *Server) handleExportCanonical(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		writer := csv.NewWriter(w)
 		if err := writer.Write([]string{
-			"record_type", "provider", "fact_kind", "local_date", "zone_offset", "source_device",
+			"record_type", "provider", "record_kind", "local_date", "zone_offset", "source_device",
 			"external_id", "start_time", "end_time", "duration_minutes", "time_in_bed_minutes",
 			"efficiency_percent", "is_nap", "summary_json", "stages_json", "metrics_json", "raw_document_id",
 		}); err != nil {
