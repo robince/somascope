@@ -1,14 +1,19 @@
 package server
 
 import (
+	"context"
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"strings"
 
 	"github.com/robince/somascope/internal/config"
 	"github.com/robince/somascope/internal/settings"
+	"github.com/robince/somascope/internal/store"
 	"github.com/robince/somascope/internal/web"
 )
 
@@ -24,10 +29,11 @@ type Server struct {
 	spaFS      fs.FS
 	spaHandler http.Handler
 	settings   *settings.Store
+	store      *store.Store
 	mux        *http.ServeMux
 }
 
-func New(cfg config.Config, version VersionInfo) (*Server, error) {
+func New(cfg config.Config, appStore *store.Store, version VersionInfo) (*Server, error) {
 	dist, err := web.Assets()
 	if err != nil {
 		return nil, err
@@ -39,6 +45,7 @@ func New(cfg config.Config, version VersionInfo) (*Server, error) {
 		spaFS:      dist,
 		spaHandler: http.FileServerFS(dist),
 		settings:   settings.NewStore(cfg.ConfigPath),
+		store:      appStore,
 		mux:        http.NewServeMux(),
 	}
 	s.routes()
@@ -54,6 +61,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/app", s.handleApp)
 	s.mux.HandleFunc("GET /api/v1/spec", s.handleSpec)
 	s.mux.HandleFunc("GET /api/v1/export/formats", s.handleExportFormats)
+	s.mux.HandleFunc("GET /api/v1/export/canonical", s.handleExportCanonical)
 	s.mux.HandleFunc("GET /api/v1/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/v1/settings", s.handlePutSettings)
 	s.mux.Handle("/", http.HandlerFunc(s.handleSPA))
@@ -68,11 +76,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleApp(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":      "somascope",
-		"auth_mode": s.cfg.AuthMode,
-		"data_dir":  s.cfg.DataDir,
-		"db_path":   s.cfg.DBPath,
-		"version":   s.version,
+		"name":           "somascope",
+		"auth_mode":      s.cfg.AuthMode,
+		"data_dir":       s.cfg.DataDir,
+		"db_path":        s.cfg.DBPath,
+		"schema_version": s.mustSchemaVersion(),
+		"version":        s.version,
 	})
 }
 
@@ -93,7 +102,7 @@ func (s *Server) handleSpec(w http.ResponseWriter, _ *http.Request) {
 			"connections",
 			"provider_credentials",
 			"sync_state",
-			"daily_facts",
+			"daily_records",
 			"sleep_sessions",
 			"metric_definitions",
 			"raw_documents",
@@ -124,6 +133,72 @@ func (s *Server) handleExportFormats(w http.ResponseWriter, _ *http.Request) {
 			},
 		},
 	})
+}
+
+func (s *Server) handleExportCanonical(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("local store unavailable"))
+		return
+	}
+
+	rows, err := s.store.CanonicalExportRows(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	format := r.URL.Query().Get("format")
+	switch format {
+	case "", "jsonl":
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		for _, row := range rows {
+			if err := json.NewEncoder(w).Encode(row); err != nil {
+				log.Printf("warning: failed writing canonical JSONL row: %v", err)
+				return
+			}
+		}
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		writer := csv.NewWriter(w)
+		if err := writer.Write([]string{
+			"record_type", "provider", "fact_kind", "local_date", "zone_offset", "source_device",
+			"external_id", "start_time", "end_time", "duration_minutes", "time_in_bed_minutes",
+			"efficiency_percent", "is_nap", "summary_json", "stages_json", "metrics_json", "raw_document_id",
+		}); err != nil {
+			log.Printf("warning: failed writing canonical CSV header: %v", err)
+			return
+		}
+		for _, row := range rows {
+			if err := writer.Write([]string{
+				row.RecordType,
+				row.Provider,
+				row.RecordKind,
+				row.LocalDate,
+				row.ZoneOffset,
+				row.SourceDevice,
+				row.ExternalID,
+				row.StartTime,
+				row.EndTime,
+				intPtrString(row.DurationMinutes),
+				intPtrString(row.TimeInBedMinutes),
+				floatPtrString(row.EfficiencyPercent),
+				boolString(row.IsNap),
+				string(row.Summary),
+				string(row.Stages),
+				string(row.Metrics),
+				int64PtrString(row.RawDocumentID),
+			}); err != nil {
+				log.Printf("warning: failed writing canonical CSV row: %v", err)
+				return
+			}
+		}
+		writer.Flush()
+		if err := writer.Error(); err != nil {
+			log.Printf("warning: failed flushing canonical CSV: %v", err)
+		}
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported export format %q", format))
+	}
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
@@ -167,6 +242,11 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveIndex(w http.ResponseWriter) {
 	file, err := s.spaFS.Open("index.html")
+	name := "index.html"
+	if err != nil {
+		file, err = s.spaFS.Open("stub.html")
+		name = "stub.html"
+	}
 	if err != nil {
 		http.Error(w, "index.html missing", http.StatusInternalServerError)
 		return
@@ -180,13 +260,17 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		log.Printf("warning: failed writing %s response: %v", name, err)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		log.Printf("warning: failed encoding JSON response: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
@@ -194,4 +278,44 @@ func writeError(w http.ResponseWriter, status int, err error) {
 		"ok":    false,
 		"error": err.Error(),
 	})
+}
+
+func (s *Server) mustSchemaVersion() int {
+	if s.store == nil {
+		return 0
+	}
+	version, err := s.store.SchemaVersion(context.Background())
+	if err != nil {
+		log.Printf("warning: failed reading schema version: %v", err)
+		return 0
+	}
+	return version
+}
+
+func intPtrString(value *int) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+func int64PtrString(value *int64) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+func floatPtrString(value *float64) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%.3f", *value)
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }

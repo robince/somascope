@@ -1,6 +1,4 @@
 -- Local-first somascope schema.
--- V1 starts with config.json-backed provider settings, but these tables
--- define the SQLite shape for the next ingestion/export slice.
 
 CREATE TABLE IF NOT EXISTS app_settings (
     key         TEXT PRIMARY KEY,
@@ -55,10 +53,10 @@ CREATE TABLE IF NOT EXISTS raw_documents (
 CREATE INDEX IF NOT EXISTS idx_raw_documents_provider_kind
     ON raw_documents(provider, document_kind, local_date);
 
-CREATE TABLE IF NOT EXISTS daily_facts (
+CREATE TABLE IF NOT EXISTS daily_records (
     id                 INTEGER PRIMARY KEY,
     provider           TEXT NOT NULL,
-    fact_kind          TEXT NOT NULL,
+    record_kind        TEXT NOT NULL,
     local_date         TEXT NOT NULL,
     zone_offset        TEXT NOT NULL DEFAULT '',
     source_device      TEXT NOT NULL DEFAULT '',
@@ -67,11 +65,11 @@ CREATE TABLE IF NOT EXISTS daily_facts (
     raw_document_id    INTEGER REFERENCES raw_documents(id) ON DELETE SET NULL,
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    UNIQUE(provider, fact_kind, local_date, external_id)
+    UNIQUE(provider, record_kind, local_date, external_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_daily_facts_provider_date
-    ON daily_facts(provider, local_date DESC, fact_kind);
+CREATE INDEX IF NOT EXISTS idx_daily_records_provider_date
+    ON daily_records(provider, local_date DESC, record_kind);
 
 CREATE TABLE IF NOT EXISTS sleep_sessions (
     id                    INTEGER PRIMARY KEY,

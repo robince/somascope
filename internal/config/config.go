@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -103,6 +104,7 @@ func envOrDefaultInt(key string, fallback int) int {
 		if _, err := fmt.Sscanf(value, "%d", &parsed); err == nil {
 			return parsed
 		}
+		log.Printf("warning: invalid integer for %s=%q, falling back to %d", key, value, fallback)
 	}
 	return fallback
 }

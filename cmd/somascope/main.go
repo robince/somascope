@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/robince/somascope/internal/config"
 	"github.com/robince/somascope/internal/server"
+	"github.com/robince/somascope/internal/store"
 )
 
 var (
@@ -25,7 +27,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	srv, err := server.New(cfg, server.VersionInfo{
+	db, err := store.Open(context.Background(), cfg.DBPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	srv, err := server.New(cfg, db, server.VersionInfo{
 		Version:   version,
 		Commit:    commit,
 		BuildDate: buildDate,

@@ -40,12 +40,12 @@ Reserved paths:
 
 ## Canonical entities
 
-V1 uses an Open Wearables-inspired model but adds a first-class daily fact layer.
+V1 uses an Open Wearables-inspired model but adds a first-class daily record layer.
 
 - `connections`
 - `provider_credentials`
 - `sync_state`
-- `daily_facts`
+- `daily_records`
 - `sleep_sessions`
 - `metric_definitions`
 - `raw_documents`

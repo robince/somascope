@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/robince/somascope/internal/config"
+	"github.com/robince/somascope/internal/store"
 )
 
 func TestHealthEndpoint(t *testing.T) {
@@ -143,6 +145,33 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 	}
 }
 
+func TestCanonicalExportJSONL(t *testing.T) {
+	srv := newTestServer(t)
+
+	if err := srv.store.UpsertDailyRecord(context.Background(), store.DailyRecord{
+		Provider:     "oura",
+		RecordKind:   "daily_activity",
+		LocalDate:    "2026-03-20",
+		ZoneOffset:   "+01:00",
+		SourceDevice: "oura-ring-4",
+		ExternalID:   "activity-1",
+		Summary:      json.RawMessage(`{"steps":12345}`),
+	}); err != nil {
+		t.Fatalf("seed daily record: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/export/canonical?format=jsonl", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"record_type":"daily_record"`) {
+		t.Fatalf("expected jsonl body to include daily record row, got %s", rec.Body.String())
+	}
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
@@ -158,12 +187,25 @@ func newTestServer(t *testing.T) *Server {
 		RawDir:     tempDir + "/raw",
 		LogsDir:    tempDir + "/logs",
 		AuthMode:   config.AuthModeBYO,
-	}, VersionInfo{Version: "test"})
+	}, mustOpenStore(t, tempDir+"/somascope.db"), VersionInfo{Version: "test"})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 
 	return srv
+}
+
+func mustOpenStore(t *testing.T, dbPath string) *store.Store {
+	t.Helper()
+
+	store, err := store.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	return store
 }
 
 func saveJSON(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {

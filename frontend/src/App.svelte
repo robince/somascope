@@ -1,8 +1,10 @@
 <script lang="ts">
   type AppInfo = {
+    name: string;
     auth_mode: string;
     data_dir: string;
     db_path: string;
+    schema_version: number;
     version?: {
       version?: string;
       commit?: string;
@@ -30,9 +32,10 @@
   type SettingsPayload = {
     user_timezone: string;
     providers: Array<{
-      provider: string;
+      provider: "fitbit" | "oura";
       configured?: boolean;
       client_id?: string;
+      client_secret?: string;
       redirect_uri?: string;
       default_scopes?: string;
       notes?: string;
