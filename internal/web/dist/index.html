@@ -80,6 +80,12 @@
         margin-top: 18px;
       }
 
+      .stack {
+        display: grid;
+        gap: 18px;
+        margin-top: 18px;
+      }
+
       .metric {
         border-radius: 14px;
         border: 1px solid var(--line);
@@ -110,12 +116,110 @@
         font-size: 13px;
       }
 
+      form {
+        display: grid;
+        gap: 14px;
+        margin-top: 16px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .field-row {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+      }
+
+      label {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 12px;
+        font: inherit;
+        color: var(--ink);
+        background: #fffefb;
+      }
+
+      textarea {
+        min-height: 72px;
+        resize: vertical;
+      }
+
+      .provider {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 16px;
+        background: #fffefb;
+      }
+
+      .provider-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: baseline;
+      }
+
+      .provider-head h3 {
+        margin: 0;
+        font-size: 24px;
+      }
+
+      .badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 4px 10px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        background: rgba(36, 106, 115, 0.1);
+        color: var(--accent);
+      }
+
+      .actions {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+      }
+
+      button {
+        border: none;
+        border-radius: 999px;
+        padding: 12px 18px;
+        font: inherit;
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+      }
+
+      .muted {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .status {
+        color: var(--accent);
+        font-size: 14px;
+      }
+
       @media (max-width: 900px) {
         .hero {
           grid-template-columns: 1fr;
         }
 
-        .grid {
+        .grid,
+        .field-row {
           grid-template-columns: 1fr;
         }
 
@@ -155,18 +259,116 @@
           <pre id="api-state">Loading...</pre>
         </div>
       </section>
+      <section class="panel stack">
+        <div>
+          <p class="eyebrow">BYO Provider Settings</p>
+          <p class="sub">
+            V1 stores your provider app credentials only on this device. This keeps
+            development simple and avoids a shared auth broker.
+          </p>
+        </div>
+        <form id="settings-form">
+          <div class="field">
+            <label for="timezone">User timezone</label>
+            <input id="timezone" name="timezone" placeholder="Europe/Paris">
+          </div>
+          <div id="providers"></div>
+          <div class="actions">
+            <span id="save-status" class="muted">Settings load from `config.json` in your local data directory.</span>
+            <button type="submit">Save local settings</button>
+          </div>
+        </form>
+      </section>
     </main>
     <script>
+      const providersEl = document.getElementById("providers");
+      const saveStatusEl = document.getElementById("save-status");
+      const timezoneEl = document.getElementById("timezone");
+
+      function providerCard(provider) {
+        const el = document.createElement("section");
+        el.className = "provider";
+        el.innerHTML = `
+          <div class="provider-head">
+            <h3>${provider.provider}</h3>
+            <span class="badge">${provider.configured ? "configured" : "not configured"}</span>
+          </div>
+          <p class="muted">${provider.notes || ""}</p>
+          <div class="field-row">
+            <div class="field">
+              <label>Client ID</label>
+              <input name="${provider.provider}:client_id" value="${provider.client_id || ""}">
+            </div>
+            <div class="field">
+              <label>Client Secret</label>
+              <input name="${provider.provider}:client_secret" type="password" placeholder="${provider.configured ? "Stored locally; leave blank to keep" : "Paste your client secret"}">
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Redirect URI</label>
+              <input name="${provider.provider}:redirect_uri" value="${provider.redirect_uri || ""}">
+            </div>
+            <div class="field">
+              <label>Default scopes</label>
+              <input name="${provider.provider}:default_scopes" value="${provider.default_scopes || ""}">
+            </div>
+          </div>
+          <div class="field">
+            <label>Notes</label>
+            <textarea name="${provider.provider}:notes">${provider.notes || ""}</textarea>
+          </div>
+        `;
+        return el;
+      }
+
+      function buildSettingsPayload(current) {
+        return {
+          user_timezone: timezoneEl.value.trim(),
+          providers: current.providers.map((provider) => ({
+            provider: provider.provider,
+            configured: provider.configured,
+            client_id: document.querySelector(`[name="${provider.provider}:client_id"]`).value.trim(),
+            client_secret: document.querySelector(`[name="${provider.provider}:client_secret"]`).value.trim(),
+            redirect_uri: document.querySelector(`[name="${provider.provider}:redirect_uri"]`).value.trim(),
+            default_scopes: document.querySelector(`[name="${provider.provider}:default_scopes"]`).value.trim(),
+            notes: document.querySelector(`[name="${provider.provider}:notes"]`).value.trim(),
+          })),
+        };
+      }
+
       Promise.all([
         fetch("/api/v1/app").then((r) => r.json()),
         fetch("/api/v1/spec").then((r) => r.json()),
-      ]).then(([app, spec]) => {
+        fetch("/api/v1/settings").then((r) => r.json()),
+      ]).then(([app, spec, settings]) => {
         document.getElementById("auth-mode").textContent = app.auth_mode;
+        timezoneEl.value = settings.user_timezone || "";
+        providersEl.replaceChildren(...settings.providers.map(providerCard));
         document.getElementById("api-state").textContent = JSON.stringify(
-          { app, spec },
+          { app, spec, settings },
           null,
           2,
         );
+
+        document.getElementById("settings-form").addEventListener("submit", async (event) => {
+          event.preventDefault();
+          saveStatusEl.textContent = "Saving local settings...";
+          const payload = buildSettingsPayload(settings);
+          const response = await fetch("/api/v1/settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const next = await response.json();
+          providersEl.replaceChildren(...next.providers.map(providerCard));
+          document.getElementById("api-state").textContent = JSON.stringify(
+            { app, spec, settings: next },
+            null,
+            2,
+          );
+          saveStatusEl.textContent = "Saved locally. Client secrets are not echoed back after save.";
+        });
       }).catch((err) => {
         document.getElementById("api-state").textContent = String(err);
       });

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/robince/somascope/internal/config"
+	"github.com/robince/somascope/internal/settings"
 	"github.com/robince/somascope/internal/web"
 )
 
@@ -22,6 +23,7 @@ type Server struct {
 	version    VersionInfo
 	spaFS      fs.FS
 	spaHandler http.Handler
+	settings   *settings.Store
 	mux        *http.ServeMux
 }
 
@@ -36,6 +38,7 @@ func New(cfg config.Config, version VersionInfo) (*Server, error) {
 		version:    version,
 		spaFS:      dist,
 		spaHandler: http.FileServerFS(dist),
+		settings:   settings.NewStore(cfg.ConfigPath),
 		mux:        http.NewServeMux(),
 	}
 	s.routes()
@@ -51,6 +54,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/app", s.handleApp)
 	s.mux.HandleFunc("GET /api/v1/spec", s.handleSpec)
 	s.mux.HandleFunc("GET /api/v1/export/formats", s.handleExportFormats)
+	s.mux.HandleFunc("GET /api/v1/settings", s.handleGetSettings)
+	s.mux.HandleFunc("PUT /api/v1/settings", s.handlePutSettings)
 	s.mux.Handle("/", http.HandlerFunc(s.handleSPA))
 }
 
@@ -121,6 +126,30 @@ func (s *Server) handleExportFormats(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
+	value, err := s.settings.Load()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
+func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
+	var next settings.Settings
+	if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	value, err := s.settings.Update(next)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
 func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	if path == "" {
@@ -158,4 +187,11 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]any{
+		"ok":    false,
+		"error": err.Error(),
+	})
 }
