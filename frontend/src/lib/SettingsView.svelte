@@ -10,6 +10,7 @@
   export let loading = false;
   export let saving = false;
   export let ouraBusy = false;
+  export let syncStartDate = "";
   export let dirty = false;
   export let error = "";
   export let success = "";
@@ -18,6 +19,9 @@
   export let onRefresh: () => void = () => {};
   export let onConnectOura: () => void = () => {};
   export let onSyncOura: () => void = () => {};
+  export let onSyncOuraFromDate: () => void = () => {};
+  export let onSyncOuraAllTime: () => void = () => {};
+  export let onSyncStartDateInput: (value: string) => void = () => {};
   export let onTimezoneInput: (value: string) => void = () => {};
   export let onProviderInput: (index: number, field: keyof ProviderSettings, value: string | boolean) => void = () => {};
 
@@ -97,9 +101,94 @@
           <dt>Last sync</dt>
           <dd>{ouraStatus?.last_sync_at ?? "Not synced yet"}</dd>
         </div>
+        <div class="stack-row">
+          <dt>Last mode</dt>
+          <dd>{ouraStatus?.last_sync?.mode ?? "None yet"}</dd>
+        </div>
       </dl>
     </aside>
   </div>
+
+  <article class="panel sync-panel" id="oura-sync">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Sync controls</p>
+        <h2>Update or backfill Oura data</h2>
+      </div>
+    </div>
+
+    <p class="helper">
+      The main update action already handles incremental sync from the last stored cursor with a 3 day overlap.
+      This section is for larger history loads: either from a date you choose or across the account’s full history.
+    </p>
+
+    <div class="sync-grid">
+      <article class="sync-card">
+        <strong>Backfill from date</strong>
+        <p class="sync-copy">Pull older history from a specific day up to the present.</p>
+        <label class="field">
+          <span class="field-label">Start date</span>
+          <input
+            type="date"
+            value={syncStartDate}
+            oninput={(event) => onSyncStartDateInput((event.currentTarget as HTMLInputElement).value)}
+          />
+        </label>
+        <button
+          class="button button-ghost"
+          type="button"
+          onclick={onSyncOuraFromDate}
+          disabled={loading || saving || ouraBusy || !ouraStatus?.connected}
+        >
+          {ouraBusy ? "Working..." : "Backfill from date"}
+        </button>
+      </article>
+
+      <article class="sync-card">
+        <strong>All time</strong>
+        <p class="sync-copy">Use this once if you want the app to pull the account’s full history.</p>
+        <button
+          class="button button-ghost"
+          type="button"
+          onclick={onSyncOuraAllTime}
+          disabled={loading || saving || ouraBusy || !ouraStatus?.connected}
+        >
+          {ouraBusy ? "Working..." : "Backfill all time"}
+        </button>
+      </article>
+    </div>
+
+    {#if ouraStatus?.last_sync}
+      <div class="sync-meta">
+        <p class="eyebrow">Last run</p>
+        <div class="sync-meta-grid">
+          <article class="sync-meta-card">
+            <strong>Range</strong>
+            <span>{ouraStatus.last_sync.start_date} to {ouraStatus.last_sync.end_date}</span>
+          </article>
+          <article class="sync-meta-card">
+            <strong>Rows</strong>
+            <span>{ouraStatus.last_sync.daily_activity_rows + ouraStatus.last_sync.daily_readiness_rows + ouraStatus.last_sync.sleep_rows}</span>
+          </article>
+          <article class="sync-meta-card">
+            <strong>Fetched</strong>
+            <span>{ouraStatus.last_sync.fetched_at}</span>
+          </article>
+        </div>
+
+        {#if ouraStatus.sync_state?.length}
+          <div class="cursor-list">
+            {#each ouraStatus.sync_state as entry}
+              <div class="cursor-row">
+                <span>{entry.entity_kind.replaceAll("_", " ")}</span>
+                <span>{entry.cursor_value}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+  </article>
 
   <article class="panel settings-panel">
     <div class="section-head">
@@ -140,7 +229,7 @@
     {:else}
       <div class="provider-grid">
         {#each providers as provider, index}
-          <article class="provider-card">
+          <article class="provider-card" id={provider.provider === "oura" ? "oura-sync" : undefined}>
             <div class="provider-head">
               <div>
                 <h3>{provider.provider === "fitbit" ? "Fitbit" : "Oura"}</h3>
@@ -189,14 +278,6 @@
                   oninput={(event) => onProviderInput(index, "default_scopes", (event.currentTarget as HTMLInputElement).value)}
                 />
               </label>
-
-              <label class="field field-wide">
-                <span class="field-label">Notes</span>
-                <textarea
-                  rows="3"
-                  oninput={(event) => onProviderInput(index, "notes", (event.currentTarget as HTMLTextAreaElement).value)}
-                >{provider.notes}</textarea>
-              </label>
             </div>
 
             {#if provider.provider === "oura"}
@@ -223,7 +304,7 @@
                   onclick={onSyncOura}
                   disabled={loading || saving || ouraBusy || !ouraStatus?.connected}
                 >
-                  {ouraBusy ? "Working..." : "Sync last 30 days"}
+                  {ouraBusy ? "Working..." : "Update now"}
                 </button>
               </div>
             {/if}
@@ -550,8 +631,7 @@
     color: var(--accent);
   }
 
-  input,
-  textarea {
+  input {
     width: 100%;
     border-radius: 14px;
     border: 1px solid var(--line);
@@ -559,10 +639,6 @@
     padding: 12px 14px;
     font: inherit;
     color: var(--ink);
-  }
-
-  textarea {
-    resize: vertical;
   }
 
   .status-copy {

@@ -320,6 +320,37 @@ func TestOuraSyncPersistsRows(t *testing.T) {
 			t.Fatalf("expected cursor 2026-03-20 for %s, got %q", entity, cursor)
 		}
 	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/providers/oura/status", nil)
+	statusRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 from status endpoint, got %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+
+	var statusPayload struct {
+		SyncState []struct {
+			EntityKind  string `json:"entity_kind"`
+			CursorValue string `json:"cursor_value"`
+		} `json:"sync_state"`
+		LastSync struct {
+			Mode      string `json:"mode"`
+			StartDate string `json:"start_date"`
+			EndDate   string `json:"end_date"`
+		} `json:"last_sync"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusPayload); err != nil {
+		t.Fatalf("unmarshal status payload: %v", err)
+	}
+	if len(statusPayload.SyncState) != 3 {
+		t.Fatalf("expected 3 sync_state entries, got %d", len(statusPayload.SyncState))
+	}
+	if statusPayload.LastSync.Mode != "backfill" {
+		t.Fatalf("expected persisted last_sync mode backfill, got %q", statusPayload.LastSync.Mode)
+	}
+	if statusPayload.LastSync.EndDate != "2026-03-20" {
+		t.Fatalf("expected persisted last_sync end_date 2026-03-20, got %q", statusPayload.LastSync.EndDate)
+	}
 }
 
 func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {

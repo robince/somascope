@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import DashboardView from "./lib/DashboardView.svelte";
   import SettingsView from "./lib/SettingsView.svelte";
   import { addDays, PERIODS, clampDate, getPeriod, isEditableTarget } from "./lib/time";
@@ -14,6 +14,8 @@
     ProviderSettings,
     SettingsPayload
   } from "./lib/types";
+
+  const OURA_ALL_TIME_START = "2010-01-01";
 
   const PROVIDER_DEFAULTS: Record<ProviderSettings["provider"], Omit<ProviderSettings, "configured" | "client_secret">> = {
     fitbit: {
@@ -48,6 +50,7 @@
   let dirty = false;
   let error = "";
   let success = "";
+  let syncStartDate = "";
 
   function baseProvider(provider: ProviderSettings["provider"]): ProviderSettings {
     const defaults = PROVIDER_DEFAULTS[provider];
@@ -133,11 +136,19 @@
     }
   }
 
-  function setActiveView(view: AppView) {
+  async function setActiveView(view: AppView, anchor = "") {
     activeView = view;
     if (typeof window !== "undefined") {
       const nextPath = view === "settings" ? "/settings" : "/";
-      window.history.pushState({}, "", nextPath);
+      const nextUrl = anchor ? `${nextPath}#${anchor}` : nextPath;
+      window.history.pushState({}, "", nextUrl);
+      if (anchor) {
+        await tick();
+        document.getElementById(anchor)?.scrollIntoView({
+          behavior: "smooth",
+          block: "start"
+        });
+      }
     }
   }
 
@@ -226,18 +237,22 @@
     }
   }
 
-  async function syncOura() {
+  async function syncOura(options?: { startDate?: string; modeLabel?: string }) {
     ouraBusy = true;
     error = "";
     success = "";
 
     try {
+      const body: Record<string, string> = {};
+      if (options?.startDate) {
+        body.start_date = options.startDate;
+      }
       const response = await fetch("/api/v1/providers/oura/sync", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({})
+        body: JSON.stringify(body)
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
@@ -245,13 +260,37 @@
       }
       const payload = await response.json();
       ouraStatus = payload.overview ?? ouraStatus;
-      success = `Oura sync complete: ${payload.sync.daily_activity_rows} activity, ${payload.sync.daily_readiness_rows} readiness, ${payload.sync.sleep_rows} sleep rows.`;
+      const modeLabel = options?.modeLabel ?? (payload.sync.mode === "backfill" ? "Backfill" : "Update");
+      success = `${modeLabel} complete: ${payload.sync.daily_activity_rows} activity, ${payload.sync.daily_readiness_rows} readiness, ${payload.sync.sleep_rows} sleep rows from ${payload.range.start_date} to ${payload.range.end_date}.`;
       await load();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {
       ouraBusy = false;
     }
+  }
+
+  async function syncOuraIncremental() {
+    await syncOura({ modeLabel: "Update" });
+  }
+
+  async function syncOuraAllTime() {
+    await syncOura({
+      startDate: OURA_ALL_TIME_START,
+      modeLabel: "All-time backfill"
+    });
+  }
+
+  async function syncOuraFromDate() {
+    if (!syncStartDate) {
+      error = "Choose a backfill start date first.";
+      success = "";
+      return;
+    }
+    await syncOura({
+      startDate: syncStartDate,
+      modeLabel: "Backfill"
+    });
   }
 
   function selectPeriod(period: PeriodId) {
@@ -334,16 +373,18 @@
 
   {#if activeView === "dashboard"}
     <DashboardView
-      {appInfo}
       {dashboard}
       {formats}
       {activePeriod}
       {windowEndDate}
       {loading}
+      {ouraBusy}
+      {ouraStatus}
       {error}
       onSelectPeriod={selectPeriod}
       onShiftWindow={shiftWindow}
-      onOpenSettings={() => setActiveView("settings")}
+      onOpenSettings={(anchor?: string) => void setActiveView("settings", anchor)}
+      onSyncIncremental={() => void syncOuraIncremental()}
     />
   {:else}
     <SettingsView
@@ -356,6 +397,7 @@
       {loading}
       {saving}
       {ouraBusy}
+      {syncStartDate}
       {dirty}
       {error}
       {success}
@@ -363,7 +405,14 @@
       onSave={save}
       onRefresh={() => void load()}
       onConnectOura={() => void connectOura()}
-      onSyncOura={() => void syncOura()}
+      onSyncOura={() => void syncOuraIncremental()}
+      onSyncOuraFromDate={() => void syncOuraFromDate()}
+      onSyncOuraAllTime={() => void syncOuraAllTime()}
+      onSyncStartDateInput={(value: string) => {
+        syncStartDate = value;
+        error = "";
+        success = "";
+      }}
       onTimezoneInput={updateTimezone}
       onProviderInput={updateProvider}
     />
@@ -380,7 +429,7 @@
   .topbar {
     display: flex;
     gap: 16px;
-    align-items: center;
+    align-items: flex-end;
     justify-content: space-between;
     margin-bottom: 22px;
   }
@@ -388,6 +437,7 @@
   .brand {
     display: grid;
     gap: 4px;
+    min-width: 0;
   }
 
   .brand-mark {
@@ -428,9 +478,17 @@
   }
 
   @media (max-width: 720px) {
+    .page-shell {
+      padding-inline: 16px;
+    }
+
     .topbar {
       flex-direction: column;
-      align-items: flex-start;
+      align-items: stretch;
+    }
+
+    .view-switch {
+      align-self: center;
     }
   }
 </style>

@@ -20,6 +20,7 @@ import (
 const (
 	ouraOAuthStateKey    = "oauth:oura:state"
 	ouraOAuthReturnToKey = "oauth:oura:return_to"
+	ouraLastSyncKey      = "oura:last_sync"
 )
 
 func (s *Server) handleOuraStatus(w http.ResponseWriter, _ *http.Request) {
@@ -35,7 +36,34 @@ func (s *Server) handleOuraStatus(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, overview)
+	syncStates, err := s.store.SyncStatesByProvider(context.Background(), "oura")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	var lastSync any
+	if value, err := s.store.AppSetting(context.Background(), ouraLastSyncKey); err == nil && strings.TrimSpace(value) != "" {
+		_ = json.Unmarshal([]byte(value), &lastSync)
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider":            overview.Provider,
+		"configured":          overview.Configured,
+		"connected":           overview.Connected,
+		"status":              overview.Status,
+		"scope":               overview.Scope,
+		"connected_at":        overview.ConnectedAt,
+		"token_expires_at":    overview.TokenExpiresAt,
+		"last_sync_at":        overview.LastSyncAt,
+		"daily_record_count":  overview.DailyRecordCount,
+		"sleep_session_count": overview.SleepSessionCount,
+		"sync_state":          syncStates,
+		"last_sync":           lastSync,
+	})
 }
 
 func (s *Server) handleOuraRecent(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +249,10 @@ func (s *Server) handleOuraSync(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	if data, err := json.Marshal(result); err == nil {
+		_ = s.store.SetAppSetting(r.Context(), ouraLastSyncKey, string(data))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

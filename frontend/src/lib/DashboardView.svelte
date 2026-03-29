@@ -3,51 +3,62 @@
     SLEEP_AXIS_LABELS,
     activitySegments,
     averageDefined,
-    buildSparkPath,
     clockTimeLabel,
     fillWindow,
     minutesToHoursLabel,
-    movingAverage,
     sleepOpacity,
-    sleepPosition,
-    sumDefined
+    sleepPosition
   } from "./dashboard";
-  import { PERIODS, formatLongDate, formatMonthDayCompact, formatRangeLabel, formatWeekday, getPeriod, getWindowStart } from "./time";
-  import type { AppInfo, DashboardOverview, ExportFormat, PeriodId } from "./types";
+  import { PERIODS, formatMonthDayCompact, formatRangeLabel, formatWeekday, getPeriod, getWindowStart } from "./time";
+  import type { DashboardOverview, ExportFormat, OuraStatus, PeriodId } from "./types";
 
-  export let appInfo: AppInfo | null = null;
   export let dashboard: DashboardOverview | null = null;
   export let formats: ExportFormat[] = [];
   export let activePeriod: PeriodId = "1m";
   export let windowEndDate = "";
   export let loading = false;
+  export let ouraBusy = false;
+  export let ouraStatus: OuraStatus | null = null;
   export let error = "";
   export let onSelectPeriod: (period: PeriodId) => void = () => {};
   export let onShiftWindow: (direction: -1 | 1) => void = () => {};
-  export let onOpenSettings: () => void = () => {};
+  export let onOpenSettings: (anchor?: string) => void = () => {};
+  export let onSyncIncremental: () => void = () => {};
+
+  const READINESS_CHART_WIDTH = 720;
+  const READINESS_CHART_HEIGHT = 220;
+  const READINESS_CHART_PAD_LEFT = 42;
+  const READINESS_CHART_PAD_RIGHT = 12;
+  const READINESS_CHART_PAD_TOP = 16;
+  const READINESS_CHART_PAD_BOTTOM = 28;
+  const READINESS_MIN = 40;
+  const READINESS_MAX = 100;
+  const READINESS_TICKS = [100, 85, 70, 55, 40];
 
   $: period = getPeriod(activePeriod);
   $: resolvedEndDate = windowEndDate || dashboard?.latest_date || "";
   $: windowStartDate = resolvedEndDate ? getWindowStart(resolvedEndDate, period.days) : "";
   $: visibleDays = dashboard && windowStartDate ? fillWindow(dashboard.daily, windowStartDate, resolvedEndDate) : [];
   $: rangeLabel = visibleDays.length ? formatRangeLabel(visibleDays[0].date, visibleDays[visibleDays.length - 1].date) : "No visible range";
-  $: dayWidth = visibleDays.length > 180 ? 8 : visibleDays.length > 90 ? 12 : visibleDays.length > 42 ? 20 : 58;
   $: chartMode = visibleDays.length > 180 ? "micro" : visibleDays.length > 42 ? "dense" : "regular";
-  $: readinessSeries = visibleDays.map((day) => day.readiness?.score ?? null);
-  $: smoothingWindow = visibleDays.length > 180 ? 21 : visibleDays.length > 90 ? 14 : visibleDays.length > 42 ? 7 : 3;
-  $: smoothedReadiness = movingAverage(readinessSeries, smoothingWindow);
-  $: sparkWidth = Math.max(visibleDays.length - 1, 1);
-  $: readinessPath = buildSparkPath(smoothedReadiness, sparkWidth, 96, 40, 100);
-  $: rawReadinessDots = readinessSeries.map((score, index) => ({
-    score,
-    x: visibleDays.length === 1 ? sparkWidth / 2 : (index / Math.max(visibleDays.length - 1, 1)) * sparkWidth,
-    y: score == null ? 0 : 96 - Math.min(Math.max((score - 40) / 60, 0), 1) * 96
-  }));
+  $: chartGap = chartMode === "micro" ? 2 : chartMode === "dense" ? 4 : 8;
+  $: readinessPoints = visibleDays.map((day, index) => {
+    const score = day.readiness?.score;
+    return score == null
+      ? null
+      : {
+          date: day.date,
+          score,
+          x: readinessX(index, visibleDays.length),
+          y: readinessY(score)
+        };
+  });
+  $: readinessPath = buildReadinessPath(readinessPoints);
+  $: readinessDotCount = readinessPoints.filter(Boolean).length;
   $: latestDay = [...visibleDays].reverse().find((day) => day.activity || day.readiness || day.sleep) ?? null;
   $: averageReadiness = averageDefined(visibleDays.map((day) => day.readiness?.score));
   $: averageSleep = averageDefined(visibleDays.map((day) => day.sleep?.duration_minutes));
-  $: totalSteps = sumDefined(visibleDays.map((day) => day.activity?.steps));
-  $: activeDays = visibleDays.filter((day) => day.activity || day.readiness || day.sleep).length;
+  $: averageDailySteps = averageDefined(visibleDays.map((day) => day.activity?.steps));
   $: plannedFormats = formats.filter((format) => format.id === "raw-json");
 
   function scoreTone(score?: number): string {
@@ -81,96 +92,99 @@
     }
     return index % 60 === 0 || index === total - 1;
   }
+
+  function readinessX(index: number, total: number): number {
+    const plotWidth = READINESS_CHART_WIDTH - READINESS_CHART_PAD_LEFT - READINESS_CHART_PAD_RIGHT;
+    if (total <= 1) {
+      return READINESS_CHART_PAD_LEFT + plotWidth / 2;
+    }
+    return READINESS_CHART_PAD_LEFT + (index / (total - 1)) * plotWidth;
+  }
+
+  function readinessY(score: number): number {
+    const plotHeight = READINESS_CHART_HEIGHT - READINESS_CHART_PAD_TOP - READINESS_CHART_PAD_BOTTOM;
+    const normalized = Math.min(Math.max((score - READINESS_MIN) / (READINESS_MAX - READINESS_MIN), 0), 1);
+    return READINESS_CHART_HEIGHT - READINESS_CHART_PAD_BOTTOM - normalized * plotHeight;
+  }
+
+  function buildReadinessPath(points: Array<{ x: number; y: number } | null>): string {
+    let path = "";
+    let activeSegment = false;
+
+    for (const point of points) {
+      if (!point) {
+        activeSegment = false;
+        continue;
+      }
+
+      path += activeSegment ? ` L ${point.x} ${point.y}` : `M ${point.x} ${point.y}`;
+      activeSegment = true;
+    }
+
+    return path;
+  }
 </script>
 
 <section class="dashboard-shell">
-  <div class="hero-grid">
-    <article class="panel intro-panel">
-      <div class="eyebrow-row">
-        <p class="eyebrow">Dashboard</p>
-        <button class="text-link" type="button" onclick={onOpenSettings}>Open settings</button>
+  <article class="panel intro-panel">
+    <div class="eyebrow-row">
+      <p class="eyebrow">Dashboard</p>
+      <div class="hero-actions">
+        <button
+          class="text-link text-link-strong"
+          type="button"
+          onclick={() => onSyncIncremental()}
+          disabled={ouraBusy || !ouraStatus?.connected}
+        >
+          {ouraBusy ? "Updating..." : "Update data"}
+        </button>
+        <button class="text-link" type="button" onclick={() => onOpenSettings()}>Open settings</button>
       </div>
-      <h1>Daily body signals, local-first.</h1>
-      <p class="lede">
-        Start with blocks and strips that make the synced Oura record feel tangible: activity as the main
-        daily block view, readiness as a compact trend, and sleep as a shared nightly timeline.
-      </p>
+    </div>
+    <h1>Daily body signals, local-first.</h1>
+    <p class="lede">
+      Keep the dashboard dense and readable: activity as the main daily block view, readiness as a simple line, and sleep as a shared nightly timeline.
+    </p>
 
-      <div class="hero-stats">
-        <article>
-          <strong>{latestDay?.readiness?.score ?? "--"}</strong>
-          <span>Latest readiness</span>
-        </article>
-        <article>
-          <strong>{minutesToHoursLabel(Math.round(averageSleep ?? 0) || undefined)}</strong>
-          <span>Average sleep in range</span>
-        </article>
-        <article>
-          <strong>{new Intl.NumberFormat().format(totalSteps)}</strong>
-          <span>Total steps in range</span>
-        </article>
-        <article>
-          <strong>{activeDays}</strong>
-          <span>Days with visible data</span>
-        </article>
-      </div>
-    </article>
+    <div class="hero-stats">
+      <article>
+        <strong>{minutesToHoursLabel(Math.round(averageSleep ?? 0) || undefined)}</strong>
+        <span>Average sleep in range</span>
+      </article>
+      <article>
+        <strong>{averageDailySteps ? new Intl.NumberFormat().format(Math.round(averageDailySteps)) : "--"}</strong>
+        <span>Average daily steps</span>
+      </article>
+      <article>
+        <strong>{ouraStatus?.last_sync_at ? "Fresh" : "--"}</strong>
+        <span>{ouraStatus?.last_sync_at ? `Last sync ${new Date(ouraStatus.last_sync_at).toLocaleString()}` : "No sync yet"}</span>
+      </article>
+    </div>
+  </article>
 
-    <aside class="panel status-panel">
-      <p class="eyebrow">Sync snapshot</p>
-      <dl class="status-stack">
-        <div class="status-row">
-          <dt>Latest local day</dt>
-          <dd>{dashboard?.latest_date ? formatLongDate(dashboard.latest_date) : "No data"}</dd>
-        </div>
-        <div class="status-row">
-          <dt>Providers</dt>
-          <dd>{dashboard?.providers.length ? dashboard.providers.join(", ") : "None"}</dd>
-        </div>
-        <div class="status-row">
-          <dt>Range loaded</dt>
-          <dd>{dashboard?.available_days ?? 0} day entries</dd>
-        </div>
-        <div class="status-row">
-          <dt>Store</dt>
-          <dd>{appInfo?.db_path ?? "Local SQLite path"}</dd>
-        </div>
-      </dl>
-    </aside>
-  </div>
-
-  <article class="panel controls-panel">
-    <div class="controls-row">
-      <div>
-        <p class="eyebrow">Navigation</p>
-        <h2>{period.label} window</h2>
-        <p class="helper-copy">{rangeLabel}</p>
+  <section class="controls-strip" aria-label="Navigation">
+    <div class="toolbar">
+      <div class="period-group">
+        {#each PERIODS as option}
+          <button
+            class:active={activePeriod === option.id}
+            class="period-button"
+            type="button"
+            onclick={() => onSelectPeriod(option.id)}
+          >
+            <span>{option.label}</span>
+          </button>
+        {/each}
       </div>
 
-      <div class="toolbar">
-        <div class="period-group">
-          {#each PERIODS as option}
-            <button
-              class:active={activePeriod === option.id}
-              class="period-button"
-              type="button"
-              onclick={() => onSelectPeriod(option.id)}
-            >
-              <span>{option.label}</span>
-              <small>{option.shortcut}</small>
-            </button>
-          {/each}
-        </div>
-
-        <div class="nav-group">
-          <button class="nav-button" type="button" onclick={() => onShiftWindow(-1)}>&larr; Prev</button>
-          <button class="nav-button" type="button" onclick={() => onShiftWindow(1)}>Next &rarr;</button>
-        </div>
+      <div class="nav-group">
+        <button class="nav-button" type="button" onclick={() => onShiftWindow(-1)}>&larr; Prev</button>
+        <button class="nav-button" type="button" onclick={() => onShiftWindow(1)}>Next &rarr;</button>
       </div>
     </div>
 
-    <p class="shortcut-copy">Keyboard: `w`, `m`, `q`, `y` switch scale; left and right arrows move the visible period.</p>
-  </article>
+    <p class="window-copy">{period.label} window · {rangeLabel}</p>
+  </section>
 
   {#if loading}
     <article class="panel empty-panel">
@@ -195,7 +209,6 @@
             <p class="eyebrow">Block View</p>
             <h2>Daily activity blocks</h2>
           </div>
-          <p class="section-note">Activity is the right first block plot: it is dense, comparable day to day, and it already carries a 24h composition.</p>
         </div>
 
         <div class="legend-row">
@@ -206,13 +219,13 @@
           <span class="legend-item off">Off-body</span>
         </div>
 
-        <div class="block-scroll">
-          <div class="activity-grid {chartMode}" style={`--day-width:${dayWidth}px;`}>
+        <div class="block-frame">
+          <div class="activity-grid {chartMode}" style={`--day-count:${visibleDays.length}; --grid-gap:${chartGap}px;`}>
             {#each visibleDays as day, index}
               {@const segments = activitySegments(day)}
               <article class:missing={!segments.length} class="activity-day">
                 <header class="day-head">
-                  <small>{formatWeekday(day.date)}</small>
+                  <small>{showTick(index, visibleDays.length) ? formatWeekday(day.date) : ""}</small>
                   <strong class={`score-pill ${scoreTone(day.activity?.score)}`}>{day.activity?.score ?? "--"}</strong>
                 </header>
 
@@ -246,7 +259,7 @@
         <div class="section-head">
           <div>
             <p class="eyebrow">Trend</p>
-            <h2>Compact readiness trend</h2>
+            <h2>Readiness trend</h2>
           </div>
           <div class="section-metrics">
             <span>Latest {latestDay?.readiness?.score ?? "--"}</span>
@@ -255,30 +268,63 @@
         </div>
 
         <div class="trend-wrap">
-          <svg viewBox={`0 0 ${sparkWidth} 96`} preserveAspectRatio="none" aria-label="Readiness trend">
-            <line x1="0" y1="16" x2={sparkWidth} y2="16" class="guide-line" />
-            <line x1="0" y1="48" x2={sparkWidth} y2="48" class="guide-line" />
-            <line x1="0" y1="80" x2={sparkWidth} y2="80" class="guide-line" />
+          <svg viewBox={`0 0 ${READINESS_CHART_WIDTH} ${READINESS_CHART_HEIGHT}`} aria-label="Readiness trend">
+            {#each READINESS_TICKS as tick}
+              {@const y = readinessY(tick)}
+              <line
+                x1={READINESS_CHART_PAD_LEFT}
+                y1={y}
+                x2={READINESS_CHART_WIDTH - READINESS_CHART_PAD_RIGHT}
+                y2={y}
+                class="guide-line"
+              />
+              <text x={READINESS_CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{tick}</text>
+            {/each}
+
             {#if readinessPath}
               <path d={readinessPath} class="trend-path" />
             {/if}
-            {#if visibleDays.length <= 90}
-              {#each rawReadinessDots as point}
-                {#if point.score != null}
-                  <circle cx={point.x} cy={point.y} r="1.7" class="trend-dot" />
+
+            {#if readinessDotCount <= 62}
+              {#each readinessPoints as point}
+                {#if point}
+                  <circle cx={point.x} cy={point.y} r="3" class="trend-dot" />
                 {/if}
               {/each}
             {/if}
+
+            <line
+              x1={READINESS_CHART_PAD_LEFT}
+              y1={READINESS_CHART_PAD_TOP}
+              x2={READINESS_CHART_PAD_LEFT}
+              y2={READINESS_CHART_HEIGHT - READINESS_CHART_PAD_BOTTOM}
+              class="axis-line"
+            />
+            <line
+              x1={READINESS_CHART_PAD_LEFT}
+              y1={READINESS_CHART_HEIGHT - READINESS_CHART_PAD_BOTTOM}
+              x2={READINESS_CHART_WIDTH - READINESS_CHART_PAD_RIGHT}
+              y2={READINESS_CHART_HEIGHT - READINESS_CHART_PAD_BOTTOM}
+              class="axis-line"
+            />
+
+            {#each visibleDays as day, index}
+              {#if showTick(index, visibleDays.length)}
+                <text
+                  x={readinessX(index, visibleDays.length)}
+                  y={READINESS_CHART_HEIGHT - 8}
+                  text-anchor="middle"
+                  class="axis-label"
+                >
+                  {formatMonthDayCompact(day.date)}
+                </text>
+              {/if}
+            {/each}
           </svg>
         </div>
 
         <div class="trend-footer">
-          <p>Smoothing uses a {smoothingWindow}-day moving average so the range shortcuts can scale without changing the chart grammar.</p>
-          <div class="trend-labels">
-            <span>40</span>
-            <span>70</span>
-            <span>100</span>
-          </div>
+          <p>Daily readiness score across the visible range.</p>
         </div>
       </article>
 
@@ -298,8 +344,8 @@
             {/each}
           </div>
 
-          <div class="sleep-scroll">
-            <div class="sleep-grid {chartMode}" style={`--day-width:${dayWidth}px;`}>
+          <div class="sleep-frame">
+            <div class="sleep-grid {chartMode}" style={`--day-count:${visibleDays.length}; --grid-gap:${chartGap}px;`}>
               {#each visibleDays as day, index}
                 {@const position = sleepPosition(day.sleep)}
                 <article class:missing={!position} class="sleep-day">
@@ -362,16 +408,11 @@
 <style>
   .dashboard-shell,
   .hero-stats,
-  .status-stack,
   .visual-grid,
-  .planned-list {
+  .planned-list,
+  .hero-actions,
+  .controls-strip {
     display: grid;
-    gap: 18px;
-  }
-
-  .hero-grid {
-    display: grid;
-    grid-template-columns: 1.4fr 0.9fr;
     gap: 18px;
   }
 
@@ -384,6 +425,7 @@
       var(--panel);
     backdrop-filter: blur(14px);
     box-shadow: 0 18px 40px rgba(24, 32, 25, 0.07);
+    min-width: 0;
   }
 
   .intro-panel {
@@ -401,15 +443,13 @@
   }
 
   .eyebrow-row,
-  .controls-row,
   .section-head,
   .toolbar,
   .period-group,
   .nav-group,
   .legend-row,
   .export-actions,
-  .section-metrics,
-  .trend-labels {
+  .section-metrics {
     display: flex;
     gap: 12px;
     align-items: center;
@@ -441,11 +481,9 @@
   }
 
   .lede,
-  .helper-copy,
   .section-note,
   .trend-footer p,
-  .shortcut-copy,
-  .status-row dd {
+  .window-copy {
     color: var(--muted);
     line-height: 1.5;
   }
@@ -453,6 +491,12 @@
   .lede {
     max-width: 52rem;
     margin-top: 14px;
+  }
+
+  .hero-actions {
+    position: relative;
+    z-index: 1;
+    gap: 8px;
   }
 
   .hero-stats {
@@ -483,44 +527,24 @@
     font-size: 0.95rem;
   }
 
-  .status-stack {
-    margin-top: 12px;
+  .controls-strip {
+    justify-items: center;
+    margin-top: 2px;
   }
 
-  .status-row {
-    display: grid;
-    gap: 4px;
-    padding: 12px 0;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .status-row:last-child {
-    border-bottom: 0;
-  }
-
-  dt,
-  .planned-card strong {
-    font-size: 12px;
-    color: var(--accent);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-  }
-
-  dd {
-    margin: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .controls-panel {
-    margin-top: 18px;
-  }
-
-  .shortcut-copy {
-    margin-top: 12px;
+  .toolbar {
+    justify-content: center;
+    flex-wrap: wrap;
   }
 
   .period-group {
     gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .window-copy {
+    text-align: center;
   }
 
   .period-button,
@@ -537,23 +561,15 @@
 
   .period-button,
   .nav-button,
-  .button {
+  .button,
+  .text-link {
     border-radius: 999px;
     padding: 10px 14px;
   }
 
-  .period-button {
-    display: inline-flex;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .period-button small {
-    color: var(--muted);
-  }
-
   .period-button.active,
-  .button-primary {
+  .button-primary,
+  .text-link-strong {
     background: var(--accent);
     color: white;
     border-color: transparent;
@@ -563,11 +579,6 @@
     background: rgba(255, 255, 255, 0.62);
   }
 
-  .text-link {
-    border-radius: 999px;
-    padding: 8px 12px;
-  }
-
   .visual-grid {
     margin-top: 18px;
   }
@@ -575,16 +586,17 @@
   .activity-grid,
   .sleep-grid {
     display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: var(--day-width);
-    gap: 10px;
+    grid-template-columns: repeat(var(--day-count), minmax(0, 1fr));
+    gap: var(--grid-gap);
     align-items: end;
+    min-width: 0;
   }
 
   .activity-day,
   .sleep-day {
     display: grid;
     gap: 10px;
+    min-width: 0;
   }
 
   .activity-day.missing,
@@ -592,10 +604,12 @@
     opacity: 0.48;
   }
 
-  .block-scroll,
-  .sleep-scroll {
-    overflow-x: auto;
-    padding-bottom: 8px;
+  .block-frame,
+  .sleep-frame {
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    padding-bottom: 4px;
   }
 
   .day-head,
@@ -647,7 +661,7 @@
 
   .segments {
     height: 250px;
-    border-radius: 16px;
+    border-radius: 12px;
     border: 1px solid var(--line);
     overflow: hidden;
     background: rgba(255, 255, 255, 0.52);
@@ -729,7 +743,6 @@
 
   .trend-wrap {
     margin-top: 20px;
-    height: 150px;
     border-radius: 20px;
     border: 1px solid var(--line);
     background: linear-gradient(180deg, rgba(26, 106, 114, 0.08), rgba(255, 255, 255, 0.55));
@@ -738,13 +751,23 @@
 
   .trend-wrap svg {
     width: 100%;
-    height: 100%;
-    overflow: visible;
+    height: auto;
+    display: block;
   }
 
   .guide-line {
     stroke: rgba(24, 32, 25, 0.1);
     stroke-width: 0.8;
+  }
+
+  .axis-line {
+    stroke: rgba(24, 32, 25, 0.2);
+    stroke-width: 1;
+  }
+
+  .axis-label {
+    fill: var(--muted);
+    font-size: 10px;
   }
 
   .trend-path {
@@ -756,19 +779,15 @@
   }
 
   .trend-dot {
-    fill: rgba(26, 106, 114, 0.28);
+    fill: var(--accent);
+    stroke: rgba(255, 255, 255, 0.9);
+    stroke-width: 1.25;
   }
 
   .trend-footer {
     display: grid;
-    gap: 10px;
-    margin-top: 12px;
-  }
-
-  .trend-labels {
-    justify-content: space-between;
-    color: var(--muted);
-    font-size: 0.82rem;
+    gap: 8px;
+    margin-top: 10px;
   }
 
   .sleep-layout {
@@ -793,7 +812,7 @@
   .sleep-track {
     position: relative;
     height: 250px;
-    border-radius: 16px;
+    border-radius: 12px;
     border: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.52);
     overflow: hidden;
@@ -858,44 +877,52 @@
     height: 180px;
   }
 
-  @media (max-width: 980px) {
-    .hero-grid,
-    .sleep-layout {
-      grid-template-columns: 1fr;
-    }
-
+  @media (max-width: 900px) {
     .hero-stats {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .controls-row,
-    .toolbar {
-      align-items: flex-start;
-      flex-direction: column;
+    .sleep-layout {
+      grid-template-columns: 30px 1fr;
     }
   }
 
   @media (max-width: 720px) {
+    h2 {
+      font-size: 1.3rem;
+    }
+
+    .eyebrow-row,
+    .section-head {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .sleep-layout {
+      grid-template-columns: 1fr;
+    }
+
+    .sleep-axis {
+      display: none;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .panel {
+      padding: 18px;
+      border-radius: 20px;
+    }
+
     .hero-stats {
       grid-template-columns: 1fr;
     }
 
-    .period-group,
-    .nav-group,
-    .export-actions {
+    .hero-actions {
       width: 100%;
-      flex-wrap: wrap;
     }
 
-    .period-button,
-    .nav-button,
-    .button {
-      flex: 1 1 0;
-      justify-content: center;
-    }
-
-    .panel {
-      padding: 18px;
+    .text-link {
+      text-align: center;
     }
   }
 </style>

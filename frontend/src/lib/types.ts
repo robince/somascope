@@ -54,6 +54,35 @@ export type OuraStatus = {
   last_sync_at?: string;
   daily_record_count: number;
   sleep_session_count: number;
+  sync_state?: SyncStateEntry[];
+  last_sync?: OuraLastSync | null;
+};
+
+export type SyncStateEntry = {
+  provider: string;
+  entity_kind: string;
+  cursor_value: string;
+  synced_at?: string;
+};
+
+export type OuraLastSyncEntity = {
+  entity: string;
+  start_date: string;
+  end_date: string;
+  cursor: string;
+  rows: number;
+  chunk_count: number;
+};
+
+export type OuraLastSync = {
+  fetched_at: string;
+  mode: string;
+  start_date: string;
+  end_date: string;
+  daily_activity_rows: number;
+  daily_readiness_rows: number;
+  sleep_rows: number;
+  entities: OuraLastSyncEntity[];
 };
 
 export type DailyRecord = {

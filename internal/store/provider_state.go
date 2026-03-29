@@ -46,6 +46,13 @@ type ProviderOverview struct {
 	SleepSessionCount int    `json:"sleep_session_count"`
 }
 
+type SyncStateEntry struct {
+	Provider    string `json:"provider"`
+	EntityKind  string `json:"entity_kind"`
+	CursorValue string `json:"cursor_value"`
+	SyncedAt    string `json:"synced_at,omitempty"`
+}
+
 func (s *Store) SetAppSetting(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO app_settings(key, value) VALUES(?, ?)
@@ -166,6 +173,31 @@ func (s *Store) InsertRawDocument(ctx context.Context, doc RawDocument) (int64, 
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+func (s *Store) SyncStatesByProvider(ctx context.Context, provider string) ([]SyncStateEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT provider, entity_kind, cursor_value, synced_at
+		FROM sync_state
+		WHERE provider = ?
+		ORDER BY entity_kind ASC
+	`, provider)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SyncStateEntry
+	for rows.Next() {
+		var entry SyncStateEntry
+		var syncedAt sql.NullString
+		if err := rows.Scan(&entry.Provider, &entry.EntityKind, &entry.CursorValue, &syncedAt); err != nil {
+			return nil, err
+		}
+		entry.SyncedAt = syncedAt.String
+		out = append(out, entry)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ProviderOverview(ctx context.Context, provider string, configured bool) (ProviderOverview, error) {
