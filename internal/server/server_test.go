@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,6 +186,10 @@ func TestCanonicalExportCSVExcludesRawDocuments(t *testing.T) {
 		DocumentKind: "daily_activity",
 		ExternalID:   "raw-1",
 		LocalDate:    "2026-03-20",
+		RequestPath:  "/v2/usercollection/daily_activity",
+		RequestQuery: "start_date=2026-03-20&end_date=2026-03-21",
+		RequestStart: "2026-03-20",
+		RequestEnd:   "2026-03-21",
 		Payload:      json.RawMessage(`{"id":"raw-1","steps":12345}`),
 		FetchedAt:    "2026-03-20T08:00:00Z",
 		DocumentKey:  "daily_activity:raw-1",
@@ -233,6 +238,10 @@ func TestRawExportJSONLFiltersByProvider(t *testing.T) {
 		DocumentKind: "daily_activity",
 		ExternalID:   "activity-1",
 		LocalDate:    "2026-03-20",
+		RequestPath:  "/v2/usercollection/daily_activity",
+		RequestQuery: "start_date=2026-03-20&end_date=2026-03-21",
+		RequestStart: "2026-03-20",
+		RequestEnd:   "2026-03-21",
 		Payload:      json.RawMessage(`{"id":"activity-1","steps":12345}`),
 		FetchedAt:    "2026-03-20T08:00:00Z",
 		DocumentKey:  "daily_activity:activity-1",
@@ -245,6 +254,9 @@ func TestRawExportJSONLFiltersByProvider(t *testing.T) {
 		DocumentKind: "sleep",
 		ExternalID:   "sleep-1",
 		LocalDate:    "2026-03-20",
+		RequestPath:  "/1.2/user/sleep/date/2026-03-20.json",
+		RequestStart: "2026-03-20",
+		RequestEnd:   "2026-03-20",
 		Payload:      json.RawMessage(`{"logId":"sleep-1"}`),
 		FetchedAt:    "2026-03-20T09:00:00Z",
 		DocumentKey:  "sleep:sleep-1",
@@ -458,8 +470,11 @@ func TestOuraSyncPersistsRows(t *testing.T) {
 func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {
 	srv := newTestServer(t)
 	requests := map[string][]string{}
+	var requestsMu sync.Mutex
 	srv.oura = oura.NewClient(&http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requestsMu.Lock()
+			defer requestsMu.Unlock()
 			switch req.URL.Path {
 			case "/v2/usercollection/personal_info":
 				requests[req.URL.Path] = append(requests[req.URL.Path], "singleton")
@@ -527,12 +542,25 @@ func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {
 		"/v2/usercollection/daily_readiness",
 		"/v2/usercollection/sleep",
 	} {
+		requestsMu.Lock()
 		ranges := requests[path]
-		if len(ranges) != 1 {
-			t.Fatalf("expected 1 request for %s, got %d", path, len(ranges))
+		requestsMu.Unlock()
+		if len(ranges) != 8 {
+			t.Fatalf("expected 8 requests for %s, got %d", path, len(ranges))
 		}
-		if ranges[0] != "2026-03-17..2026-03-24" {
-			t.Fatalf("expected overlap range for %s, got %q", path, ranges[0])
+		switch path {
+		case "/v2/usercollection/daily_activity":
+			if ranges[0] != "2026-03-17..2026-03-18" || ranges[len(ranges)-1] != "2026-03-24..2026-03-25" {
+				t.Fatalf("unexpected daily_activity ranges: %+v", ranges)
+			}
+		case "/v2/usercollection/daily_readiness":
+			if ranges[0] != "2026-03-17..2026-03-17" || ranges[len(ranges)-1] != "2026-03-24..2026-03-24" {
+				t.Fatalf("unexpected daily_readiness ranges: %+v", ranges)
+			}
+		case "/v2/usercollection/sleep":
+			if ranges[0] != "2026-03-16..2026-03-17" || ranges[len(ranges)-1] != "2026-03-23..2026-03-24" {
+				t.Fatalf("unexpected sleep ranges: %+v", ranges)
+			}
 		}
 	}
 }
@@ -540,16 +568,19 @@ func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {
 func TestOuraSyncFetchesExpandedRawEndpoints(t *testing.T) {
 	srv := newTestServer(t)
 	requested := map[string]int{}
+	var requestedMu sync.Mutex
 	srv.oura = oura.NewClient(&http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requestedMu.Lock()
 			requested[req.URL.Path]++
+			requestedMu.Unlock()
 			switch req.URL.Path {
 			case "/v2/usercollection/personal_info":
 				return jsonResponse(http.StatusOK, `{"id":"person-1","email":"test@example.com"}`), nil
 			case "/v2/usercollection/daily_stress":
 				return jsonResponse(http.StatusOK, `{"data":[{"id":"stress-1","day":"2026-03-20","stress_high":120}]}`), nil
 			case "/v2/usercollection/heartrate":
-				return jsonResponse(http.StatusOK, `{"data":[{"timestamp":"2026-03-20T00:05:00+00:00","bpm":55,"source":"rest"}]}`), nil
+				return jsonResponse(http.StatusOK, `{"data":[{"timestamp":"2026-03-20T00:05:00+00:00","bpm":55,"source":"rest"},{"timestamp":"2026-03-20T00:10:00+00:00","bpm":56,"source":"rest"}]}`), nil
 			default:
 				return jsonResponse(http.StatusOK, `{"data":[]}`), nil
 			}
@@ -606,9 +637,12 @@ func TestOuraSyncFetchesExpandedRawEndpoints(t *testing.T) {
 		"/v2/usercollection/daily_readiness",
 		"/v2/usercollection/sleep",
 	} {
+		requestedMu.Lock()
 		if requested[path] == 0 {
+			requestedMu.Unlock()
 			t.Fatalf("expected %s to be fetched at least once", path)
 		}
+		requestedMu.Unlock()
 	}
 
 	var rawCount int
@@ -621,6 +655,32 @@ func TestOuraSyncFetchesExpandedRawEndpoints(t *testing.T) {
 	}
 	if rawCount < 3 {
 		t.Fatalf("expected raw docs for expanded endpoints, got %d", rawCount)
+	}
+
+	run, err := srv.store.LatestSuccessfulSyncRunByProvider(context.Background(), "oura")
+	if err != nil {
+		t.Fatalf("latest successful run: %v", err)
+	}
+	entities, err := srv.store.SyncRunEntities(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("sync run entities: %v", err)
+	}
+	for _, entity := range entities {
+		if entity.EntityKind == "heartrate" && entity.RowsWritten != 1 {
+			t.Fatalf("expected heartrate rows_written to count archived raw pages, got %d", entity.RowsWritten)
+		}
+	}
+
+	var emptyRawCount int
+	if err := srv.store.DB().QueryRowContext(context.Background(), `
+		SELECT COUNT(*)
+		FROM raw_documents
+		WHERE provider = 'oura' AND payload_json = '{"data":[],"next_token":null}'
+	`).Scan(&emptyRawCount); err != nil {
+		t.Fatalf("count empty raw docs: %v", err)
+	}
+	if emptyRawCount != 0 {
+		t.Fatalf("expected empty collection responses to be skipped, got %d rows", emptyRawCount)
 	}
 }
 

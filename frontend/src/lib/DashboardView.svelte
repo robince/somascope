@@ -21,7 +21,6 @@
   export let error = "";
   export let onSelectPeriod: (period: PeriodId) => void = () => {};
   export let onShiftWindow: (direction: -1 | 1) => void = () => {};
-  export let onOpenSettings: (anchor?: string) => void = () => {};
   export let onSyncIncremental: () => void = () => {};
 
   const CHART_WIDTH = 720;
@@ -265,7 +264,6 @@
         >
           {ouraBusy ? "Updating..." : "Update data"}
         </button>
-        <button class="text-link" type="button" onclick={() => onOpenSettings()}>Open settings</button>
       </div>
     </div>
 
@@ -330,7 +328,7 @@
         <div class="section-head">
           <div>
             <p class="eyebrow">Trend</p>
-            <h2>Steps trend</h2>
+            <h2>Steps</h2>
           </div>
         </div>
 
@@ -413,16 +411,13 @@
           </svg>
         </div>
 
-        <div class="trend-footer">
-          <p>{chartResolution === "weekly" ? "Weekly mean steps" : "Daily steps"} across the visible range with a light rolling average overlay.</p>
-        </div>
       </article>
 
       <article class="panel readiness-panel">
         <div class="section-head">
           <div>
             <p class="eyebrow">Trend</p>
-            <h2>Readiness trend</h2>
+            <h2>Readiness</h2>
           </div>
         </div>
 
@@ -494,18 +489,14 @@
           </svg>
         </div>
 
-        <div class="trend-footer">
-          <p>{chartResolution === "weekly" ? "Weekly mean readiness" : "Daily readiness"} with the same rolling average overlay.</p>
-        </div>
       </article>
 
       <article class="panel sleep-panel">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Night Axis</p>
-            <h2>Sleep timing</h2>
+            <p class="eyebrow">Timing</p>
+            <h2>Sleep</h2>
           </div>
-          <p class="section-note">Bedtime and wake time on a shared vertical axis from 6pm to 12pm next day, using weekly medians when the window gets long.</p>
         </div>
 
         <div class="trend-wrap sleep-wrap">
@@ -593,18 +584,18 @@
           </span>
         </div>
 
-        <div class="trend-footer">
-          <p>{chartResolution === "weekly" ? "Weekly median" : "Daily"} sleep start and end times on the same night axis. Typical sleep duration in range: {minutesToHoursLabel(Math.round(averageSleep ?? 0) || undefined)}.</p>
-        </div>
       </article>
 
       <article class="panel export-panel">
         <div class="export-stack">
           <div class="section-head">
             <div>
-              <p class="eyebrow">Export</p>
-              <h2>Visualised data</h2>
+              <h2>Data Export</h2>
             </div>
+          </div>
+
+          <div class="export-subhead export-subhead-clean">
+            <p class="eyebrow">Clean data</p>
           </div>
 
           <div class="export-actions">
@@ -699,8 +690,6 @@
     font-size: 1.55rem;
   }
 
-  .section-note,
-  .trend-footer p,
   .window-copy {
     color: var(--muted);
     line-height: 1.5;
@@ -924,12 +913,6 @@
     fill: rgba(26, 106, 114, 0.42);
   }
 
-  .trend-footer {
-    display: grid;
-    gap: 8px;
-    margin-top: 10px;
-  }
-
   .export-stack {
     display: grid;
     gap: 18px;
@@ -940,6 +923,11 @@
     gap: 4px;
     padding-top: 4px;
     border-top: 1px solid var(--line);
+  }
+
+  .export-subhead-clean {
+    padding-top: 0;
+    border-top: 0;
   }
 
   .sleep-wrap {

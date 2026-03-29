@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robince/somascope/internal/providersync"
@@ -20,6 +21,8 @@ const (
 	defaultBootstrapDays      = 30
 	defaultIncrementalOverlap = 3
 	defaultRetryAttempts      = 4
+	defaultRequestWindow      = 5 * time.Minute
+	defaultRequestBudget      = 3000
 )
 
 type SyncOptions struct {
@@ -37,12 +40,19 @@ const (
 )
 
 type syncEntity struct {
-	kind        string
-	featurePath string
-	chunkDays   int
-	queryMode   queryMode
-	useCursor   bool
-	apply       func(context.Context, *store.Store, map[string]any, string) error
+	kind          string
+	featurePath   string
+	queryMode     queryMode
+	useCursor     bool
+	requestWindow func(time.Time) syncRequestWindow
+	normalize     func(context.Context, *store.Store, map[string]any, string, *int64) error
+}
+
+type syncRequestWindow struct {
+	params       url.Values
+	requestStart string
+	requestEnd   string
+	logicalDate  string
 }
 
 func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, connection store.Connection, options SyncOptions) error {
@@ -79,6 +89,10 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 		return err
 	}
 	fetchedAt := time.Now().UTC().Format(time.RFC3339)
+	syncClient := client
+	if client != nil && client.HTTPClient != nil && client.HTTPClient.Transport == nil {
+		syncClient = client.WithRateLimiter(NewRequestPacer(defaultRequestBudget, defaultRequestWindow))
+	}
 	entities := syncEntities()
 
 	overallStart := endDate
@@ -99,44 +113,77 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 	}
 
 	for _, entity := range entities {
-		switch entity.queryMode {
-		case queryModeNone:
-			if err := syncEntityNoRange(ctx, st, client, activeConnection.AccessToken, fetchedAt, entity, tracker); err != nil {
-				return err
-			}
-		default:
-			entityStart, err := resolveEntityStart(ctx, st, entity.kind, options.StartDate, endDate, entity.useCursor)
-			if err != nil {
-				return err
-			}
-			if err := syncEntityRange(ctx, st, client, activeConnection.AccessToken, fetchedAt, entity, entityStart, endDate, tracker); err != nil {
-				return err
-			}
+		if entity.queryMode != queryModeNone {
+			continue
+		}
+		if err := syncEntityNoRange(ctx, st, syncClient, activeConnection.AccessToken, fetchedAt, entity, tracker); err != nil {
+			return err
 		}
 	}
 
-	return nil
+	type entityJob struct {
+		entity    syncEntity
+		startDate time.Time
+	}
+	jobs := make([]entityJob, 0, len(entities))
+	for _, entity := range entities {
+		if entity.queryMode == queryModeNone {
+			continue
+		}
+		entityStart, err := resolveEntityStart(ctx, st, entity.kind, options.StartDate, endDate, entity.useCursor)
+		if err != nil {
+			return err
+		}
+		jobs = append(jobs, entityJob{
+			entity:    entity,
+			startDate: entityStart,
+		})
+	}
+
+	syncCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg       sync.WaitGroup
+		errOnce  sync.Once
+		firstErr error
+	)
+	for _, job := range jobs {
+		job := job
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := syncEntityRange(syncCtx, st, syncClient, activeConnection.AccessToken, fetchedAt, job.entity, job.startDate, endDate, tracker); err != nil {
+				errOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 func syncEntities() []syncEntity {
 	return []syncEntity{
-		{kind: "personal_info", featurePath: "/v2/usercollection/personal_info", queryMode: queryModeNone, apply: applyRawOnly("personal_info")},
-		{kind: "tag", featurePath: "/v2/usercollection/tag", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("tag")},
-		{kind: "enhanced_tag", featurePath: "/v2/usercollection/enhanced_tag", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("enhanced_tag")},
-		{kind: "workout", featurePath: "/v2/usercollection/workout", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("workout")},
-		{kind: "session", featurePath: "/v2/usercollection/session", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("session")},
-		{kind: "daily_activity", featurePath: "/v2/usercollection/daily_activity", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyDailyActivity},
-		{kind: "daily_sleep", featurePath: "/v2/usercollection/daily_sleep", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("daily_sleep")},
-		{kind: "daily_spo2", featurePath: "/v2/usercollection/daily_spo2", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("daily_spo2")},
-		{kind: "daily_readiness", featurePath: "/v2/usercollection/daily_readiness", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyDailyReadiness},
-		{kind: "sleep", featurePath: "/v2/usercollection/sleep", chunkDays: 30, queryMode: queryModeDate, useCursor: true, apply: applySleep},
-		{kind: "sleep_time", featurePath: "/v2/usercollection/sleep_time", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("sleep_time")},
-		{kind: "rest_mode_period", featurePath: "/v2/usercollection/rest_mode_period", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("rest_mode_period")},
-		{kind: "daily_stress", featurePath: "/v2/usercollection/daily_stress", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("daily_stress")},
-		{kind: "daily_resilience", featurePath: "/v2/usercollection/daily_resilience", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("daily_resilience")},
-		{kind: "daily_cardiovascular_age", featurePath: "/v2/usercollection/daily_cardiovascular_age", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("daily_cardiovascular_age")},
-		{kind: "vo2_max", featurePath: "/v2/usercollection/vO2_max", chunkDays: 90, queryMode: queryModeDate, useCursor: true, apply: applyRawOnly("vo2_max")},
-		{kind: "heartrate", featurePath: "/v2/usercollection/heartrate", chunkDays: 14, queryMode: queryModeDateTime, useCursor: true, apply: applyRawOnly("heartrate")},
+		{kind: "personal_info", featurePath: "/v2/usercollection/personal_info", queryMode: queryModeNone},
+		{kind: "tag", featurePath: "/v2/usercollection/tag", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "enhanced_tag", featurePath: "/v2/usercollection/enhanced_tag", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "workout", featurePath: "/v2/usercollection/workout", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "session", featurePath: "/v2/usercollection/session", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "daily_activity", featurePath: "/v2/usercollection/daily_activity", queryMode: queryModeDate, useCursor: true, requestWindow: nextDayExclusiveDateWindow, normalize: applyDailyActivity},
+		{kind: "daily_sleep", featurePath: "/v2/usercollection/daily_sleep", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "daily_spo2", featurePath: "/v2/usercollection/daily_spo2", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "daily_readiness", featurePath: "/v2/usercollection/daily_readiness", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow, normalize: applyDailyReadiness},
+		{kind: "sleep", featurePath: "/v2/usercollection/sleep", queryMode: queryModeDate, useCursor: true, requestWindow: sleepResultDayWindow, normalize: applySleep},
+		{kind: "sleep_time", featurePath: "/v2/usercollection/sleep_time", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "rest_mode_period", featurePath: "/v2/usercollection/rest_mode_period", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "daily_stress", featurePath: "/v2/usercollection/daily_stress", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "daily_resilience", featurePath: "/v2/usercollection/daily_resilience", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "daily_cardiovascular_age", featurePath: "/v2/usercollection/daily_cardiovascular_age", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "vo2_max", featurePath: "/v2/usercollection/vO2_max", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "heartrate", featurePath: "/v2/usercollection/heartrate", queryMode: queryModeDateTime, useCursor: true, requestWindow: halfOpenDateTimeWindow},
 	}
 }
 
@@ -154,26 +201,50 @@ func syncEntityNoRange(ctx context.Context, st *store.Store, client *Client, acc
 	)
 	switch entity.kind {
 	case "personal_info":
-		var item map[string]any
-		item, err = client.FetchDocument(ctx, accessToken, entity.featurePath, RetryConfig{
+		var result DocumentResult
+		result, err = client.FetchDocumentResult(ctx, accessToken, entity.featurePath, RetryConfig{
 			MaxAttempts: defaultRetryAttempts,
 			OnRetry:     retryCallback(tracker, entity, "", ""),
 		})
-		if err == nil && len(item) > 0 {
-			items = []map[string]any{item}
+		if err == nil {
+			if _, archiveErr := archiveRawResponse(ctx, st, entity, syncRequestWindow{}, result.RawBody, fetchedAt, nil); archiveErr != nil {
+				return archiveErr
+			}
+			if len(result.Value) > 0 {
+				items = []map[string]any{result.Value}
+			}
 		}
 	default:
-		items, err = client.FetchCollection(ctx, accessToken, entity.featurePath, nil, RetryConfig{
+		pages, pageErr := client.FetchCollectionPages(ctx, accessToken, entity.featurePath, nil, RetryConfig{
 			MaxAttempts: defaultRetryAttempts,
 			OnRetry:     retryCallback(tracker, entity, "", ""),
 		})
+		err = pageErr
+		if err == nil {
+			for _, page := range pages {
+				if !shouldArchiveCollectionPage(page) {
+					continue
+				}
+				if _, archiveErr := archiveRawResponse(ctx, st, entity, syncRequestWindow{
+					params:       page.Query,
+					requestStart: "",
+					requestEnd:   "",
+				}, page.RawBody, fetchedAt, nil); archiveErr != nil {
+					return archiveErr
+				}
+				items = append(items, page.Data...)
+			}
+		}
 	}
 	if err != nil {
 		return failEntity(tracker, entity, "", "", "fetch_collection", err)
 	}
 
 	for _, item := range items {
-		if err := entity.apply(ctx, st, item, fetchedAt); err != nil {
+		if entity.normalize == nil {
+			continue
+		}
+		if err := entity.normalize(ctx, st, item, fetchedAt, nil); err != nil {
 			return failEntity(tracker, entity, "", "", "apply_document", err)
 		}
 	}
@@ -187,47 +258,71 @@ func syncEntityRange(ctx context.Context, st *store.Store, client *Client, acces
 	if startDate.After(endDate) {
 		startDate = endDate
 	}
-	totalChunks := countChunks(startDate, endDate, entity.chunkDays)
+	totalChunks := countChunks(startDate, endDate, 1)
 	if err := tracker.StartEntity(entity.kind, startDate.Format(dateLayout), endDate.Format(dateLayout), totalChunks); err != nil {
 		return err
 	}
 
-	for chunkStart := startDate; !chunkStart.After(endDate); chunkStart = chunkStart.AddDate(0, 0, entity.chunkDays) {
-		chunkEnd := minDate(chunkStart.AddDate(0, 0, entity.chunkDays-1), endDate)
-		chunkStartLabel := chunkStart.Format(dateLayout)
-		chunkEndLabel := chunkEnd.Format(dateLayout)
-		if err := tracker.StartChunk(entity.kind, chunkStartLabel, chunkEndLabel); err != nil {
+	for day := startDate; !day.After(endDate); day = day.AddDate(0, 0, 1) {
+		window := entity.requestWindow(day)
+		chunkLabel := window.logicalDate
+		if chunkLabel == "" {
+			chunkLabel = day.Format(dateLayout)
+		}
+		if err := tracker.StartChunk(entity.kind, chunkLabel, chunkLabel); err != nil {
 			return err
 		}
 
-		params := rangeParams(entity.queryMode, chunkStart, chunkEnd)
-		items, err := client.FetchCollection(ctx, accessToken, entity.featurePath, params, RetryConfig{
+		pages, err := client.FetchCollectionPages(ctx, accessToken, entity.featurePath, window.params, RetryConfig{
 			MaxAttempts: defaultRetryAttempts,
-			OnRetry:     retryCallback(tracker, entity, chunkStartLabel, chunkEndLabel),
+			OnRetry:     retryCallback(tracker, entity, chunkLabel, chunkLabel),
 		})
 		if err != nil {
-			return failEntity(tracker, entity, chunkStartLabel, chunkEndLabel, "fetch_collection", err)
+			return failEntity(tracker, entity, chunkLabel, chunkLabel, "fetch_collection", err)
 		}
 
-		for _, item := range items {
-			if err := entity.apply(ctx, st, item, fetchedAt); err != nil {
-				return failEntity(tracker, entity, chunkStartLabel, chunkEndLabel, "apply_document", err)
+		rowsWritten := 0
+		for _, page := range pages {
+			if !shouldArchiveCollectionPage(page) {
+				continue
+			}
+			pageWindow := window
+			pageWindow.params = page.Query
+			rawID, archiveErr := archiveRawResponse(ctx, st, entity, pageWindow, page.RawBody, fetchedAt, &day)
+			if archiveErr != nil {
+				return failEntity(tracker, entity, chunkLabel, chunkLabel, "archive_raw_response", archiveErr)
+			}
+
+			if entity.normalize == nil {
+				rowsWritten++
+				continue
+			}
+
+			for _, item := range page.Data {
+				if err := entity.normalize(ctx, st, item, fetchedAt, &rawID); err != nil {
+					return failEntity(tracker, entity, chunkLabel, chunkLabel, "apply_document", err)
+				}
+				rowsWritten++
 			}
 		}
 
 		cursor := ""
 		if entity.useCursor {
-			cursor = chunkEndLabel
+			cursor = chunkLabel
 			if err := st.UpsertSyncState(ctx, "oura", entity.kind, cursor, fetchedAt); err != nil {
-				return failEntity(tracker, entity, chunkStartLabel, chunkEndLabel, "update_sync_state", err)
+				return failEntity(tracker, entity, chunkLabel, chunkLabel, "update_sync_state", err)
 			}
 		}
-		if err := tracker.CompleteChunk(entity.kind, cursor, len(items)); err != nil {
+		if err := tracker.CompleteChunk(entity.kind, cursor, rowsWritten); err != nil {
 			return err
 		}
 	}
 
 	return tracker.CompleteEntity(entity.kind)
+}
+
+func shouldArchiveCollectionPage(page CollectionPage) bool {
+	return len(page.Data) > 0 || strings.TrimSpace(page.NextToken) != ""
 }
 
 func retryCallback(tracker *providersync.Tracker, entity syncEntity, chunkStartDate, chunkEndDate string) func(*APIError, time.Duration) {
@@ -274,19 +369,6 @@ func toSyncError(entityKind, endpoint, chunkStartDate, chunkEndDate, operation s
 		out.ResponseBody = apiErr.ResponseBody
 	}
 	return out
-}
-
-func rangeParams(mode queryMode, startDate, endDate time.Time) url.Values {
-	params := url.Values{}
-	switch mode {
-	case queryModeDate:
-		params.Set("start_date", startDate.Format(dateLayout))
-		params.Set("end_date", endDate.Format(dateLayout))
-	case queryModeDateTime:
-		params.Set("start_datetime", startDate.UTC().Format(time.RFC3339))
-		params.Set("end_datetime", time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 23, 59, 59, 0, time.UTC).Format(time.RFC3339))
-	}
-	return params
 }
 
 func countChunks(startDate, endDate time.Time, chunkDays int) int {
@@ -353,35 +435,82 @@ func parseDate(value string) (time.Time, error) {
 	return parsed.UTC(), nil
 }
 
-func applyRawOnly(documentKind string) func(context.Context, *store.Store, map[string]any, string) error {
-	return func(ctx context.Context, st *store.Store, item map[string]any, fetchedAt string) error {
-		_, err := st.UpsertRawDocument(ctx, store.RawDocument{
-			Provider:     "oura",
-			DocumentKind: documentKind,
-			ExternalID:   rawExternalID(item),
-			LocalDate:    rawLocalDate(item),
-			ZoneOffset:   rawZoneOffset(item),
-			Payload:      mustJSON(item),
-			FetchedAt:    fetchedAt,
-			DocumentKey:  rawDocumentKey(documentKind, item),
-		})
-		return err
+func inclusiveDateWindow(day time.Time) syncRequestWindow {
+	date := day.Format(dateLayout)
+	params := url.Values{}
+	params.Set("start_date", date)
+	params.Set("end_date", date)
+	return syncRequestWindow{
+		params:       params,
+		requestStart: date,
+		requestEnd:   date,
+		logicalDate:  date,
 	}
 }
 
-func applyDailyActivity(ctx context.Context, st *store.Store, item map[string]any, fetchedAt string) error {
-	rawID, err := st.UpsertRawDocument(ctx, store.RawDocument{
-		Provider:     "oura",
-		DocumentKind: "daily_activity",
-		ExternalID:   stringValue(item["id"]),
-		LocalDate:    stringValue(item["day"]),
-		Payload:      mustJSON(item),
-		FetchedAt:    fetchedAt,
-		DocumentKey:  rawDocumentKey("daily_activity", item),
-	})
-	if err != nil {
-		return err
+func nextDayExclusiveDateWindow(day time.Time) syncRequestWindow {
+	start := day.Format(dateLayout)
+	end := day.AddDate(0, 0, 1).Format(dateLayout)
+	params := url.Values{}
+	params.Set("start_date", start)
+	params.Set("end_date", end)
+	return syncRequestWindow{
+		params:       params,
+		requestStart: start,
+		requestEnd:   end,
+		logicalDate:  start,
 	}
+}
+
+func sleepResultDayWindow(day time.Time) syncRequestWindow {
+	start := day.AddDate(0, 0, -1).Format(dateLayout)
+	end := day.Format(dateLayout)
+	params := url.Values{}
+	params.Set("start_date", start)
+	params.Set("end_date", end)
+	return syncRequestWindow{
+		params:       params,
+		requestStart: start,
+		requestEnd:   end,
+		logicalDate:  end,
+	}
+}
+
+func halfOpenDateTimeWindow(day time.Time) syncRequestWindow {
+	start := day.UTC()
+	end := day.AddDate(0, 0, 1).UTC()
+	params := url.Values{}
+	params.Set("start_datetime", start.Format(time.RFC3339))
+	params.Set("end_datetime", end.Format(time.RFC3339))
+	return syncRequestWindow{
+		params:       params,
+		requestStart: start.Format(time.RFC3339),
+		requestEnd:   end.Format(time.RFC3339),
+		logicalDate:  day.Format(dateLayout),
+	}
+}
+
+func archiveRawResponse(ctx context.Context, st *store.Store, entity syncEntity, window syncRequestWindow, payload json.RawMessage, fetchedAt string, fallbackDay *time.Time) (int64, error) {
+	localDate := strings.TrimSpace(window.logicalDate)
+	if localDate == "" && fallbackDay != nil {
+		localDate = fallbackDay.Format(dateLayout)
+	}
+
+	return st.UpsertRawDocument(ctx, store.RawDocument{
+		Provider:     "oura",
+		DocumentKind: entity.kind,
+		LocalDate:    localDate,
+		RequestPath:  entity.featurePath,
+		RequestQuery: encodeValues(window.params),
+		RequestStart: window.requestStart,
+		RequestEnd:   window.requestEnd,
+		Payload:      payload,
+		FetchedAt:    fetchedAt,
+		DocumentKey:  requestDocumentKey(entity.kind, entity.featurePath, window.params),
+	})
+}
+
+func applyDailyActivity(ctx context.Context, st *store.Store, item map[string]any, _ string, rawDocumentID *int64) error {
 	return st.UpsertDailyRecord(ctx, store.DailyRecord{
 		Provider:      "oura",
 		RecordKind:    "daily_activity",
@@ -390,23 +519,11 @@ func applyDailyActivity(ctx context.Context, st *store.Store, item map[string]an
 		SourceDevice:  "oura-ring",
 		ExternalID:    stringValue(item["id"]),
 		Summary:       normalizeDailyActivity(item),
-		RawDocumentID: &rawID,
+		RawDocumentID: rawDocumentID,
 	})
 }
 
-func applyDailyReadiness(ctx context.Context, st *store.Store, item map[string]any, fetchedAt string) error {
-	rawID, err := st.UpsertRawDocument(ctx, store.RawDocument{
-		Provider:     "oura",
-		DocumentKind: "daily_readiness",
-		ExternalID:   stringValue(item["id"]),
-		LocalDate:    stringValue(item["day"]),
-		Payload:      mustJSON(item),
-		FetchedAt:    fetchedAt,
-		DocumentKey:  rawDocumentKey("daily_readiness", item),
-	})
-	if err != nil {
-		return err
-	}
+func applyDailyReadiness(ctx context.Context, st *store.Store, item map[string]any, _ string, rawDocumentID *int64) error {
 	return st.UpsertDailyRecord(ctx, store.DailyRecord{
 		Provider:      "oura",
 		RecordKind:    "daily_readiness",
@@ -415,24 +532,11 @@ func applyDailyReadiness(ctx context.Context, st *store.Store, item map[string]a
 		SourceDevice:  "oura-ring",
 		ExternalID:    stringValue(item["id"]),
 		Summary:       normalizeDailyReadiness(item),
-		RawDocumentID: &rawID,
+		RawDocumentID: rawDocumentID,
 	})
 }
 
-func applySleep(ctx context.Context, st *store.Store, item map[string]any, fetchedAt string) error {
-	rawID, err := st.UpsertRawDocument(ctx, store.RawDocument{
-		Provider:     "oura",
-		DocumentKind: "sleep",
-		ExternalID:   stringValue(item["id"]),
-		LocalDate:    stringValue(item["day"]),
-		Payload:      mustJSON(item),
-		FetchedAt:    fetchedAt,
-		DocumentKey:  rawDocumentKey("sleep", item),
-	})
-	if err != nil {
-		return err
-	}
-
+func applySleep(ctx context.Context, st *store.Store, item map[string]any, _ string, rawDocumentID *int64) error {
 	durationMinutes := secondsToMinutes(item["total_sleep_duration"])
 	timeInBedMinutes := secondsToMinutes(item["time_in_bed"])
 	efficiency := floatPointer(item["efficiency"])
@@ -450,7 +554,7 @@ func applySleep(ctx context.Context, st *store.Store, item map[string]any, fetch
 		IsNap:             strings.EqualFold(stringValue(item["type"]), "rest"),
 		Stages:            normalizeSleepStages(item),
 		Metrics:           normalizeSleepMetrics(item),
-		RawDocumentID:     &rawID,
+		RawDocumentID:     rawDocumentID,
 	})
 }
 
@@ -570,61 +674,17 @@ func floatFromAny(value any) (float64, bool) {
 	}
 }
 
-func rawExternalID(item map[string]any) string {
-	for _, key := range []string{"id", "document_id"} {
-		if value := strings.TrimSpace(stringValue(item[key])); value != "" {
-			return value
-		}
+func encodeValues(values url.Values) string {
+	if len(values) == 0 {
+		return ""
 	}
-	return ""
+	return values.Encode()
 }
 
-func rawLocalDate(item map[string]any) string {
-	for _, key := range []string{"day", "date"} {
-		if value := strings.TrimSpace(stringValue(item[key])); value != "" {
-			return value
-		}
-	}
-	for _, key := range []string{"timestamp", "start_time", "start_datetime", "bedtime_start"} {
-		if value := strings.TrimSpace(stringValue(item[key])); len(value) >= 10 {
-			return value[:10]
-		}
-	}
-	return ""
-}
-
-func rawZoneOffset(item map[string]any) string {
-	for _, key := range []string{"timestamp", "start_time", "start_datetime", "bedtime_start", "period_start"} {
-		if offset := zoneOffset(item[key]); offset != "" {
-			return offset
-		}
-	}
-	return ""
-}
-
-func rawDocumentKey(documentKind string, item map[string]any) string {
-	if externalID := rawExternalID(item); externalID != "" {
-		return "id:" + externalID
-	}
-
-	parts := []string{
-		strings.TrimSpace(stringValue(item["day"])),
-		strings.TrimSpace(stringValue(item["date"])),
-		strings.TrimSpace(stringValue(item["timestamp"])),
-		strings.TrimSpace(stringValue(item["start_time"])),
-		strings.TrimSpace(stringValue(item["start_datetime"])),
-		strings.TrimSpace(stringValue(item["bedtime_start"])),
-		strings.TrimSpace(stringValue(item["bedtime_end"])),
-		strings.TrimSpace(stringValue(item["period_start"])),
-		strings.TrimSpace(stringValue(item["period_end"])),
-	}
-	parts = slices.DeleteFunc(parts, func(value string) bool { return value == "" })
-	if len(parts) > 0 {
-		return documentKind + ":" + strings.Join(parts, "|")
-	}
-
-	hash := sha1.Sum(mustJSON(item))
-	return documentKind + ":sha1:" + hex.EncodeToString(hash[:])
+func requestDocumentKey(documentKind, path string, params url.Values) string {
+	raw := documentKind + "|" + path + "|" + encodeValues(params)
+	sum := sha1.Sum([]byte(raw))
+	return "request:sha1:" + hex.EncodeToString(sum[:])
 }
 
 func firstNonEmpty(values ...string) string {

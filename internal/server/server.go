@@ -251,7 +251,8 @@ func (s *Server) handleExportRaw(w http.ResponseWriter, r *http.Request) {
 		writer := csv.NewWriter(w)
 		if err := writer.Write([]string{
 			"record_type", "provider", "document_kind", "local_date", "zone_offset",
-			"external_id", "fetched_at", "document_key", "raw_document_id", "payload_json",
+			"external_id", "request_path", "request_query", "request_start", "request_end",
+			"fetched_at", "document_key", "raw_document_id", "payload_json",
 		}); err != nil {
 			log.Printf("warning: failed writing raw CSV header: %v", err)
 			return
@@ -264,6 +265,10 @@ func (s *Server) handleExportRaw(w http.ResponseWriter, r *http.Request) {
 				row.LocalDate,
 				row.ZoneOffset,
 				row.ExternalID,
+				row.RequestPath,
+				row.RequestQuery,
+				row.RequestStart,
+				row.RequestEnd,
 				row.FetchedAt,
 				row.DocumentKey,
 				fmt.Sprintf("%d", row.RawDocumentID),

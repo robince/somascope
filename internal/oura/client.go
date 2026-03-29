@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,12 +36,25 @@ type TokenBundle struct {
 }
 
 type Client struct {
-	HTTPClient *http.Client
+	HTTPClient  *http.Client
+	RateLimiter RequestLimiter
 }
 
 type RetryConfig struct {
 	MaxAttempts int
 	OnRetry     func(*APIError, time.Duration)
+}
+
+type CollectionPage struct {
+	Query     url.Values
+	Data      []map[string]any
+	NextToken string
+	RawBody   json.RawMessage
+}
+
+type DocumentResult struct {
+	Value   map[string]any
+	RawBody json.RawMessage
 }
 
 type APIError struct {
@@ -52,11 +67,73 @@ type APIError struct {
 	Err          error
 }
 
+type RequestLimiter interface {
+	Wait(context.Context) error
+}
+
+type RequestPacer struct {
+	interval time.Duration
+	mu       sync.Mutex
+	nextAt   time.Time
+}
+
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &Client{HTTPClient: httpClient}
+}
+
+func (c *Client) WithRateLimiter(limiter RequestLimiter) *Client {
+	if c == nil {
+		return nil
+	}
+	return &Client{
+		HTTPClient:  c.HTTPClient,
+		RateLimiter: limiter,
+	}
+}
+
+func NewRequestPacer(maxRequests int, per time.Duration) *RequestPacer {
+	if maxRequests < 1 {
+		maxRequests = 1
+	}
+	if per <= 0 {
+		per = time.Second
+	}
+	interval := time.Duration(math.Ceil(float64(per) / float64(maxRequests)))
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	return &RequestPacer{interval: interval}
+}
+
+func (p *RequestPacer) Wait(ctx context.Context) error {
+	if p == nil || p.interval <= 0 {
+		return nil
+	}
+
+	p.mu.Lock()
+	now := time.Now()
+	readyAt := now
+	if p.nextAt.After(now) {
+		readyAt = p.nextAt
+	}
+	p.nextAt = readyAt.Add(p.interval)
+	p.mu.Unlock()
+
+	delay := time.Until(readyAt)
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (e *APIError) Error() string {
@@ -162,7 +239,20 @@ func (c *Client) tokenRequest(ctx context.Context, values url.Values) (TokenBund
 }
 
 func (c *Client) FetchCollection(ctx context.Context, accessToken, path string, params url.Values, retry RetryConfig) ([]map[string]any, error) {
+	pages, err := c.FetchCollectionPages(ctx, accessToken, path, params, retry)
+	if err != nil {
+		return nil, err
+	}
+
 	var out []map[string]any
+	for _, page := range pages {
+		out = append(out, page.Data...)
+	}
+	return out, nil
+}
+
+func (c *Client) FetchCollectionPages(ctx context.Context, accessToken, path string, params url.Values, retry RetryConfig) ([]CollectionPage, error) {
+	var out []CollectionPage
 	var nextToken string
 	for {
 		pageParams := url.Values{}
@@ -175,10 +265,18 @@ func (c *Client) FetchCollection(ctx context.Context, accessToken, path string, 
 			Data      []map[string]any `json:"data"`
 			NextToken string           `json:"next_token"`
 		}
-		if err := c.doJSON(ctx, accessToken, path, pageParams, &payload, retry); err != nil {
+		rawBody, err := c.doJSON(ctx, accessToken, path, pageParams, &payload, retry)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, payload.Data...)
+
+		out = append(out, CollectionPage{
+			Query:     cloneValues(pageParams),
+			Data:      payload.Data,
+			NextToken: strings.TrimSpace(payload.NextToken),
+			RawBody:   rawBody,
+		})
+
 		nextToken = strings.TrimSpace(payload.NextToken)
 		if nextToken == "" {
 			break
@@ -189,14 +287,26 @@ func (c *Client) FetchCollection(ctx context.Context, accessToken, path string, 
 }
 
 func (c *Client) FetchDocument(ctx context.Context, accessToken, path string, retry RetryConfig) (map[string]any, error) {
-	var out map[string]any
-	if err := c.doJSON(ctx, accessToken, path, nil, &out, retry); err != nil {
+	result, err := c.FetchDocumentResult(ctx, accessToken, path, retry)
+	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	return result.Value, nil
 }
 
-func (c *Client) doJSON(ctx context.Context, accessToken, path string, params url.Values, target any, retry RetryConfig) error {
+func (c *Client) FetchDocumentResult(ctx context.Context, accessToken, path string, retry RetryConfig) (DocumentResult, error) {
+	var out map[string]any
+	rawBody, err := c.doJSON(ctx, accessToken, path, nil, &out, retry)
+	if err != nil {
+		return DocumentResult{}, err
+	}
+	return DocumentResult{
+		Value:   out,
+		RawBody: rawBody,
+	}, nil
+}
+
+func (c *Client) doJSON(ctx context.Context, accessToken, path string, params url.Values, target any, retry RetryConfig) (json.RawMessage, error) {
 	maxAttempts := retry.MaxAttempts
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -210,10 +320,16 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Accept", "application/json")
+
+		if c.RateLimiter != nil {
+			if err := c.RateLimiter.Wait(ctx); err != nil {
+				return nil, err
+			}
+		}
 
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
@@ -224,17 +340,17 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 					retry.OnRetry(apiErr, backoff)
 				}
 				if sleepErr := sleepWithContext(ctx, backoff); sleepErr != nil {
-					return sleepErr
+					return nil, sleepErr
 				}
 				continue
 			}
-			return apiErr
+			return nil, apiErr
 		}
 
 		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
-			return readErr
+			return nil, readErr
 		}
 		if resp.StatusCode >= 400 {
 			apiErr := &APIError{
@@ -251,20 +367,20 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 					retry.OnRetry(apiErr, backoff)
 				}
 				if sleepErr := sleepWithContext(ctx, backoff); sleepErr != nil {
-					return sleepErr
+					return nil, sleepErr
 				}
 				continue
 			}
-			return apiErr
+			return nil, apiErr
 		}
 
 		if err := json.Unmarshal(body, target); err != nil {
-			return err
+			return nil, err
 		}
-		return nil
+		return json.RawMessage(body), nil
 	}
 
-	return fmt.Errorf("oura api %s exceeded retry budget", path)
+	return nil, fmt.Errorf("oura api %s exceeded retry budget", path)
 }
 
 func cloneValues(values url.Values) url.Values {

@@ -570,7 +570,6 @@
       error={dashboardError}
       onSelectPeriod={selectPeriod}
       onShiftWindow={shiftWindow}
-      onOpenSettings={(anchor?: string) => void setActiveView("settings", anchor)}
       onSyncIncremental={() => void syncOuraIncremental()}
     />
   </section>

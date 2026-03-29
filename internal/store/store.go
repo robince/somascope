@@ -23,6 +23,8 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode = WAL;"); err != nil {
 		db.Close()

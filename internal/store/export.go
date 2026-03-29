@@ -61,6 +61,10 @@ type RawExportRow struct {
 	ExternalID    string          `json:"external_id,omitempty"`
 	LocalDate     string          `json:"local_date,omitempty"`
 	ZoneOffset    string          `json:"zone_offset,omitempty"`
+	RequestPath   string          `json:"request_path,omitempty"`
+	RequestQuery  string          `json:"request_query,omitempty"`
+	RequestStart  string          `json:"request_start,omitempty"`
+	RequestEnd    string          `json:"request_end,omitempty"`
 	FetchedAt     string          `json:"fetched_at"`
 	DocumentKey   string          `json:"document_key,omitempty"`
 	RawDocumentID int64           `json:"raw_document_id"`
@@ -234,6 +238,10 @@ func (s *Store) RawExportRows(ctx context.Context, provider string) ([]RawExport
 			COALESCE(external_id, ''),
 			COALESCE(local_date, ''),
 			COALESCE(zone_offset, ''),
+			request_path,
+			request_query,
+			request_start,
+			request_end,
 			fetched_at,
 			document_key,
 			id,
@@ -260,6 +268,10 @@ func (s *Store) RawExportRows(ctx context.Context, provider string) ([]RawExport
 			&row.ExternalID,
 			&row.LocalDate,
 			&row.ZoneOffset,
+			&row.RequestPath,
+			&row.RequestQuery,
+			&row.RequestStart,
+			&row.RequestEnd,
 			&row.FetchedAt,
 			&row.DocumentKey,
 			&row.RawDocumentID,

@@ -21,8 +21,8 @@ func TestOpenAppliesInitialMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema version: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("expected schema version 2, got %d", version)
+	if version != 3 {
+		t.Fatalf("expected schema version 3, got %d", version)
 	}
 }
 
@@ -94,6 +94,10 @@ func TestRawExportRowsFiltersByProvider(t *testing.T) {
 		DocumentKind: "daily_activity",
 		ExternalID:   "activity-1",
 		LocalDate:    "2026-03-20",
+		RequestPath:  "/v2/usercollection/daily_activity",
+		RequestQuery: "start_date=2026-03-20&end_date=2026-03-21",
+		RequestStart: "2026-03-20",
+		RequestEnd:   "2026-03-21",
 		Payload:      json.RawMessage(`{"id":"activity-1","steps":12345}`),
 		FetchedAt:    "2026-03-20T10:00:00Z",
 		DocumentKey:  "daily_activity:activity-1",
@@ -125,5 +129,8 @@ func TestRawExportRowsFiltersByProvider(t *testing.T) {
 	}
 	if rows[0].Provider != "oura" || rows[0].DocumentKind != "daily_activity" {
 		t.Fatalf("unexpected raw export row: %+v", rows[0])
+	}
+	if rows[0].RequestPath != "/v2/usercollection/daily_activity" {
+		t.Fatalf("expected request_path to round-trip, got %q", rows[0].RequestPath)
 	}
 }

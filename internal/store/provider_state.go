@@ -30,6 +30,10 @@ type RawDocument struct {
 	ExternalID   string
 	LocalDate    string
 	ZoneOffset   string
+	RequestPath  string
+	RequestQuery string
+	RequestStart string
+	RequestEnd   string
 	Payload      json.RawMessage
 	FetchedAt    string
 	DocumentKey  string
@@ -242,9 +246,13 @@ func (s *Store) SyncState(ctx context.Context, provider, entityKind string) (str
 func (s *Store) InsertRawDocument(ctx context.Context, doc RawDocument) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO raw_documents (
-			provider, document_kind, external_id, local_date, zone_offset, payload_json, fetched_at, document_key
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, doc.Provider, doc.DocumentKind, nullIfEmpty(doc.ExternalID), nullIfEmpty(doc.LocalDate), nullIfEmpty(doc.ZoneOffset), string(doc.Payload), doc.FetchedAt, doc.DocumentKey)
+			provider, document_kind, external_id, local_date, zone_offset,
+			request_path, request_query, request_start, request_end,
+			payload_json, fetched_at, document_key
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, doc.Provider, doc.DocumentKind, nullIfEmpty(doc.ExternalID), nullIfEmpty(doc.LocalDate), nullIfEmpty(doc.ZoneOffset),
+		doc.RequestPath, doc.RequestQuery, doc.RequestStart, doc.RequestEnd,
+		string(doc.Payload), doc.FetchedAt, doc.DocumentKey)
 	if err != nil {
 		return 0, err
 	}
@@ -259,16 +267,24 @@ func (s *Store) UpsertRawDocument(ctx context.Context, doc RawDocument) (int64, 
 	var id int64
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO raw_documents (
-			provider, document_kind, external_id, local_date, zone_offset, payload_json, fetched_at, document_key
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			provider, document_kind, external_id, local_date, zone_offset,
+			request_path, request_query, request_start, request_end,
+			payload_json, fetched_at, document_key
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider, document_kind, document_key) DO UPDATE SET
 			external_id = excluded.external_id,
 			local_date = excluded.local_date,
 			zone_offset = excluded.zone_offset,
+			request_path = excluded.request_path,
+			request_query = excluded.request_query,
+			request_start = excluded.request_start,
+			request_end = excluded.request_end,
 			payload_json = excluded.payload_json,
 			fetched_at = excluded.fetched_at
 		RETURNING id
-	`, doc.Provider, doc.DocumentKind, nullIfEmpty(doc.ExternalID), nullIfEmpty(doc.LocalDate), nullIfEmpty(doc.ZoneOffset), string(doc.Payload), doc.FetchedAt, doc.DocumentKey).Scan(&id)
+	`, doc.Provider, doc.DocumentKind, nullIfEmpty(doc.ExternalID), nullIfEmpty(doc.LocalDate), nullIfEmpty(doc.ZoneOffset),
+		doc.RequestPath, doc.RequestQuery, doc.RequestStart, doc.RequestEnd,
+		string(doc.Payload), doc.FetchedAt, doc.DocumentKey).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
