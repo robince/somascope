@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+
   type AppInfo = {
     name: string;
     auth_mode: string;
@@ -17,6 +19,51 @@
     label: string;
     description: string;
     status: string;
+  };
+
+  type OuraStatus = {
+    provider: string;
+    configured: boolean;
+    connected: boolean;
+    status: string;
+    scope?: string;
+    connected_at?: string;
+    token_expires_at?: string;
+    last_sync_at?: string;
+    daily_record_count: number;
+    sleep_session_count: number;
+  };
+
+  type DailyRecord = {
+    provider: string;
+    record_kind: string;
+    local_date: string;
+    zone_offset?: string;
+    source_device?: string;
+    external_id?: string;
+    summary: Record<string, unknown>;
+    raw_document_id?: number;
+  };
+
+  type SleepSession = {
+    provider: string;
+    local_date: string;
+    zone_offset?: string;
+    external_id?: string;
+    start_time: string;
+    end_time: string;
+    duration_minutes?: number;
+    time_in_bed_minutes?: number;
+    efficiency_percent?: number;
+    is_nap?: boolean;
+    stages?: Record<string, number>;
+    metrics?: Record<string, unknown>;
+    raw_document_id?: number;
+  };
+
+  type OuraRecent = {
+    daily_records: DailyRecord[];
+    sleep_sessions: SleepSession[];
   };
 
   type ProviderSettings = {
@@ -46,15 +93,15 @@
     fitbit: {
       provider: "fitbit",
       client_id: "",
-      redirect_uri: "http://127.0.0.1:8080/oauth/fitbit/callback",
+      redirect_uri: "http://localhost:18080/oauth/fitbit/callback",
       default_scopes: "activity heartrate sleep profile",
       notes: "Best for development and single-user local setups."
     },
     oura: {
       provider: "oura",
       client_id: "",
-      redirect_uri: "http://127.0.0.1:8080/oauth/oura/callback",
-      default_scopes: "daily heartrate personal",
+      redirect_uri: "http://localhost:18080/oauth/oura/callback",
+      default_scopes: "email personal daily heartrate tag workout session spo2",
       notes: "Use your own Oura app credentials in v1; shared brokered mode comes later."
     }
   };
@@ -65,9 +112,12 @@
   let userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   let loading = true;
   let saving = false;
+  let ouraBusy = false;
   let dirty = false;
   let error = "";
   let success = "";
+  let ouraStatus: OuraStatus | null = null;
+  let ouraRecent: OuraRecent = { daily_records: [], sleep_sessions: [] };
 
   function baseProvider(provider: ProviderSettings["provider"]): ProviderSettings {
     const defaults = PROVIDER_DEFAULTS[provider];
@@ -109,19 +159,23 @@
     success = "";
 
     try {
-      const [appRes, exportRes, settingsRes] = await Promise.all([
+      const [appRes, exportRes, settingsRes, ouraStatusRes, ouraRecentRes] = await Promise.all([
         fetch("/api/v1/app"),
         fetch("/api/v1/export/formats"),
-        fetch("/api/v1/settings")
+        fetch("/api/v1/settings"),
+        fetch("/api/v1/providers/oura/status"),
+        fetch("/api/v1/providers/oura/recent")
       ]);
 
-      if (!appRes.ok || !exportRes.ok || !settingsRes.ok) {
+      if (!appRes.ok || !exportRes.ok || !settingsRes.ok || !ouraStatusRes.ok || !ouraRecentRes.ok) {
         throw new Error("Failed to load application settings.");
       }
 
       appInfo = await appRes.json();
       const exportPayload = await exportRes.json();
       const settingsPayload: SettingsPayload = await settingsRes.json();
+      ouraStatus = await ouraStatusRes.json();
+      ouraRecent = await ouraRecentRes.json();
 
       formats = exportPayload.items ?? [];
       userTimezone = settingsPayload.user_timezone || userTimezone;
@@ -131,6 +185,36 @@
       error = err instanceof Error ? err.message : String(err);
     } finally {
       loading = false;
+    }
+  }
+
+  function numberValue(value: unknown): string {
+    if (typeof value === "number") {
+      return Number.isInteger(value) ? `${value}` : value.toFixed(2);
+    }
+    if (typeof value === "string") {
+      return value;
+    }
+    return "—";
+  }
+
+  function metricValue(summary: Record<string, unknown>, key: string): string {
+    return numberValue(summary[key]);
+  }
+
+  function timeLabel(value: string): string {
+    if (!value) {
+      return "—";
+    }
+    try {
+      return new Date(value).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+    } catch {
+      return value;
     }
   }
 
@@ -184,7 +268,64 @@
     }
   }
 
-  load();
+  async function connectOura() {
+    ouraBusy = true;
+    error = "";
+    success = "";
+
+    try {
+      const response = await fetch("/api/v1/providers/oura/auth/start", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          return_to: window.location.href
+        })
+      });
+      if (!response.ok) {
+        throw new Error("Failed to start Oura authorization.");
+      }
+      const payload = await response.json();
+      if (!payload.authorize_url) {
+        throw new Error("Missing Oura authorize URL.");
+      }
+      window.location.href = payload.authorize_url;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      ouraBusy = false;
+    }
+  }
+
+  async function syncOura() {
+    ouraBusy = true;
+    error = "";
+    success = "";
+
+    try {
+      const response = await fetch("/api/v1/providers/oura/sync", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || "Failed to sync Oura data.");
+      }
+      const payload = await response.json();
+      ouraStatus = payload.overview ?? ouraStatus;
+      success = `Oura sync complete: ${payload.sync.daily_activity_rows} activity, ${payload.sync.daily_readiness_rows} readiness, ${payload.sync.sleep_rows} sleep rows.`;
+      await load();
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      ouraBusy = false;
+    }
+  }
+
+  onMount(load);
 </script>
 
 <svelte:head>
@@ -219,19 +360,23 @@
     </div>
 
     <aside class="panel side-panel">
-      <p class="eyebrow">App Status</p>
+      <p class="eyebrow">Oura Status</p>
       <dl class="stack">
         <div class="stack-row">
-          <dt>Data root</dt>
-          <dd>{appInfo?.data_dir ?? "Loading..."}</dd>
+          <dt>Connection</dt>
+          <dd>{ouraStatus?.connected ? "Connected" : "Not connected"}</dd>
         </div>
         <div class="stack-row">
-          <dt>Version</dt>
-          <dd>{appInfo?.version?.version ?? "dev"}</dd>
+          <dt>Daily records</dt>
+          <dd>{ouraStatus?.daily_record_count ?? 0}</dd>
         </div>
         <div class="stack-row">
-          <dt>Future mode</dt>
-          <dd>Brokered shared-app OAuth can slot in later.</dd>
+          <dt>Sleep sessions</dt>
+          <dd>{ouraStatus?.sleep_session_count ?? 0}</dd>
+        </div>
+        <div class="stack-row">
+          <dt>Last sync</dt>
+          <dd>{ouraStatus?.last_sync_at ?? "Not synced yet"}</dd>
         </div>
       </dl>
     </aside>
@@ -255,7 +400,8 @@
 
     <p class="helper">
       Secrets are only entered when you want to write them. After save, somascope treats them
-      as present locally but does not render them back into the page.
+      as present locally but does not render them back into the page. For Oura, the next step is
+      browser authorization against your local callback and then a manual sync.
     </p>
 
     <div class="timezone-row">
@@ -328,15 +474,38 @@
                   oninput={(event) => updateProvider(index, "default_scopes", (event.currentTarget as HTMLInputElement).value)}
                 />
               </label>
-
-              <label class="field field-wide">
-                <span class="field-label">Notes</span>
-                <textarea
-                  rows="3"
-                  oninput={(event) => updateProvider(index, "notes", (event.currentTarget as HTMLTextAreaElement).value)}
-                >{provider.notes}</textarea>
-              </label>
             </div>
+
+            <p class="provider-notes">{provider.notes}</p>
+
+            {#if provider.provider === "oura"}
+              <div class="provider-actions">
+                <button
+                  class="button button-ghost"
+                  type="button"
+                  onclick={load}
+                  disabled={loading || saving || ouraBusy}
+                >
+                  Refresh status
+                </button>
+                <button
+                  class="button button-ghost"
+                  type="button"
+                  onclick={connectOura}
+                  disabled={loading || saving || ouraBusy || !provider.configured}
+                >
+                  {ouraBusy ? "Working..." : "Connect Oura"}
+                </button>
+                <button
+                  class="button button-primary"
+                  type="button"
+                  onclick={syncOura}
+                  disabled={loading || saving || ouraBusy || !ouraStatus?.connected}
+                >
+                  {ouraBusy ? "Working..." : "Sync last 30 days"}
+                </button>
+              </div>
+            {/if}
           </article>
         {/each}
       </div>
@@ -366,6 +535,68 @@
           <small>{format.status}</small>
         </article>
       {/each}
+    </div>
+  </section>
+
+  <section class="panel data-panel">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Recent Oura Data</p>
+        <h2>See what the sync actually pulled</h2>
+      </div>
+    </div>
+
+    <div class="data-grid">
+      <article class="data-card">
+        <strong>Daily records</strong>
+        {#if ouraRecent.daily_records.length === 0}
+          <p class="empty-copy">No daily records yet. Connect Oura and run a sync.</p>
+        {:else}
+          <div class="record-list">
+            {#each ouraRecent.daily_records as record}
+              <div class="record-row">
+                <div>
+                  <p class="record-kind">{record.record_kind.replaceAll("_", " ")}</p>
+                  <p class="record-date">{record.local_date}</p>
+                </div>
+                <div class="record-metrics">
+                  {#if record.record_kind === "daily_activity"}
+                    <span>{metricValue(record.summary, "steps")} steps</span>
+                    <span>{metricValue(record.summary, "active_calories")} active kcal</span>
+                  {:else if record.record_kind === "daily_readiness"}
+                    <span>{metricValue(record.summary, "score")} score</span>
+                    <span>{metricValue(record.summary, "temperature_deviation")} temp dev</span>
+                  {:else}
+                    <span>{Object.keys(record.summary).length} fields</span>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </article>
+
+      <article class="data-card">
+        <strong>Sleep sessions</strong>
+        {#if ouraRecent.sleep_sessions.length === 0}
+          <p class="empty-copy">No sleep sessions yet. The first sync will populate them.</p>
+        {:else}
+          <div class="record-list">
+            {#each ouraRecent.sleep_sessions as session}
+              <div class="record-row">
+                <div>
+                  <p class="record-kind">{session.is_nap ? "nap" : "sleep"}</p>
+                  <p class="record-date">{timeLabel(session.start_time)} to {timeLabel(session.end_time)}</p>
+                </div>
+                <div class="record-metrics">
+                  <span>{session.duration_minutes ?? "—"} min asleep</span>
+                  <span>{session.efficiency_percent ?? "—"}% eff</span>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </article>
     </div>
   </section>
 </main>
@@ -499,7 +730,8 @@
   }
 
   .settings-panel,
-  .exports-panel {
+  .exports-panel,
+  .data-panel {
     margin-top: 18px;
   }
 
@@ -513,6 +745,19 @@
   .actions {
     display: flex;
     gap: 10px;
+  }
+
+  .provider-notes {
+    margin-top: 14px;
+    color: var(--muted);
+    line-height: 1.55;
+  }
+
+  .provider-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 16px;
   }
 
   .button {
@@ -580,8 +825,7 @@
     text-transform: uppercase;
   }
 
-  input,
-  textarea {
+  input {
     width: 100%;
     border: 1px solid var(--line);
     border-radius: 12px;
@@ -591,13 +835,7 @@
     font: inherit;
   }
 
-  textarea {
-    resize: vertical;
-    min-height: 84px;
-  }
-
-  input:focus,
-  textarea:focus {
+  input:focus {
     outline: 2px solid rgba(26, 106, 114, 0.16);
     border-color: rgba(26, 106, 114, 0.35);
   }
@@ -650,6 +888,68 @@
     margin-top: 18px;
   }
 
+  .data-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 18px;
+  }
+
+  .data-card {
+    padding: 18px;
+    background: rgba(255, 255, 255, 0.35);
+  }
+
+  .record-list {
+    display: grid;
+    gap: 10px;
+    margin-top: 14px;
+  }
+
+  .record-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: start;
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+
+  .record-row:first-child {
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .record-kind {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 12px;
+    color: var(--accent);
+  }
+
+  .record-date {
+    margin-top: 4px;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+
+  .record-metrics {
+    display: grid;
+    gap: 4px;
+    justify-items: end;
+    text-align: right;
+  }
+
+  .record-metrics span {
+    color: var(--ink);
+  }
+
+  .empty-copy {
+    margin-top: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
   .format small {
     display: block;
     margin-top: 10px;
@@ -662,6 +962,7 @@
     .hero,
     .facts,
     .formats,
+    .data-grid,
     .field-grid,
     .section-head {
       grid-template-columns: 1fr;
@@ -675,6 +976,15 @@
     .provider-head {
       flex-direction: column;
       align-items: stretch;
+    }
+
+    .record-row {
+      grid-template-columns: 1fr;
+    }
+
+    .record-metrics {
+      justify-items: start;
+      text-align: left;
     }
   }
 </style>

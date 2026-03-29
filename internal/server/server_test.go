@@ -3,12 +3,15 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/robince/somascope/internal/config"
+	"github.com/robince/somascope/internal/oura"
 	"github.com/robince/somascope/internal/store"
 )
 
@@ -93,7 +96,7 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 				"provider":"fitbit",
 				"client_id":"fitbit-client",
 				"client_secret":"secret-one",
-				"redirect_uri":"http://127.0.0.1:8080/oauth/fitbit/callback",
+				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
 				"default_scopes":"activity heartrate sleep profile",
 				"notes":"Fitbit notes"
 			},
@@ -101,8 +104,8 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 				"provider":"oura",
 				"client_id":"",
 				"client_secret":"",
-				"redirect_uri":"http://127.0.0.1:8080/oauth/oura/callback",
-				"default_scopes":"daily heartrate personal email",
+				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
+				"default_scopes":"email personal daily heartrate tag workout session spo2",
 				"notes":"Oura notes"
 			}
 		]
@@ -115,7 +118,7 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 				"provider":"fitbit",
 				"client_id":"fitbit-client",
 				"client_secret":"",
-				"redirect_uri":"http://127.0.0.1:8080/oauth/fitbit/callback",
+				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
 				"default_scopes":"activity heartrate sleep profile",
 				"notes":"Fitbit notes"
 			},
@@ -123,8 +126,8 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 				"provider":"oura",
 				"client_id":"",
 				"client_secret":"",
-				"redirect_uri":"http://127.0.0.1:8080/oauth/oura/callback",
-				"default_scopes":"daily heartrate personal email",
+				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
+				"default_scopes":"email personal daily heartrate tag workout session spo2",
 				"notes":"Oura notes"
 			}
 		]
@@ -172,14 +175,340 @@ func TestCanonicalExportJSONL(t *testing.T) {
 	}
 }
 
+func TestOuraAuthStartReturnsAuthorizeURL(t *testing.T) {
+	srv := newTestServer(t)
+
+	saveJSON(t, srv, `{
+		"user_timezone":"Europe/London",
+		"providers":[
+			{
+				"provider":"fitbit",
+				"client_id":"",
+				"client_secret":"",
+				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
+				"default_scopes":"activity heartrate sleep profile",
+				"notes":"Fitbit notes"
+			},
+			{
+				"provider":"oura",
+				"client_id":"oura-client",
+				"client_secret":"oura-secret",
+				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
+				"default_scopes":"email personal daily",
+				"notes":"Oura notes"
+			}
+		]
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/providers/oura/auth/start", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	parsed, err := url.Parse(payload.AuthorizeURL)
+	if err != nil {
+		t.Fatalf("parse authorize_url: %v", err)
+	}
+	if parsed.Host != "cloud.ouraring.com" {
+		t.Fatalf("expected Oura auth host, got %s", parsed.Host)
+	}
+	if got := parsed.Query().Get("client_id"); got != "oura-client" {
+		t.Fatalf("expected client_id in authorize URL, got %q", got)
+	}
+}
+
+func TestOuraSyncPersistsRows(t *testing.T) {
+	srv := newTestServer(t)
+	srv.oura = oura.NewClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case req.URL.Path == "/v2/usercollection/daily_activity":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"activity-1","day":"2026-03-20","timestamp":"2026-03-20T23:59:59+00:00","steps":12345,"active_calories":450,"contributors":{"meet_daily_targets":90}}]}`), nil
+			case req.URL.Path == "/v2/usercollection/daily_readiness":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"readiness-1","day":"2026-03-20","timestamp":"2026-03-20T07:00:00+00:00","score":82,"temperature_deviation":0.1}]}`), nil
+			case req.URL.Path == "/v2/usercollection/sleep":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"sleep-1","day":"2026-03-20","bedtime_start":"2026-03-19T23:00:00+00:00","bedtime_end":"2026-03-20T07:00:00+00:00","time_in_bed":28800,"total_sleep_duration":27000,"efficiency":88,"type":"long_sleep","deep_sleep_duration":5400,"light_sleep_duration":14400,"rem_sleep_duration":7200,"awake_time":1800,"average_heart_rate":55}]}`), nil
+			default:
+				return jsonResponse(http.StatusNotFound, `{"error":"not found"}`), nil
+			}
+		}),
+	})
+
+	saveJSON(t, srv, `{
+		"user_timezone":"Europe/London",
+		"providers":[
+			{
+				"provider":"fitbit",
+				"client_id":"",
+				"client_secret":"",
+				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
+				"default_scopes":"activity heartrate sleep profile",
+				"notes":"Fitbit notes"
+			},
+			{
+				"provider":"oura",
+				"client_id":"oura-client",
+				"client_secret":"oura-secret",
+				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
+				"default_scopes":"email personal daily",
+				"notes":"Oura notes"
+			}
+		]
+	}`)
+
+	if err := srv.store.UpsertConnection(context.Background(), store.Connection{
+		Provider:    "oura",
+		AccessToken: "oura-access",
+		Status:      "connected",
+		ConnectedAt: "2026-03-20T08:00:00Z",
+	}); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/providers/oura/sync", strings.NewReader(`{"start_date":"2026-03-19","end_date":"2026-03-20"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Sync struct {
+			Mode     string `json:"mode"`
+			Entities []struct {
+				Entity string `json:"entity"`
+				Cursor string `json:"cursor"`
+			} `json:"entities"`
+		} `json:"sync"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal sync response: %v", err)
+	}
+	if payload.Sync.Mode != "backfill" {
+		t.Fatalf("expected backfill mode, got %q", payload.Sync.Mode)
+	}
+	if len(payload.Sync.Entities) != 3 {
+		t.Fatalf("expected 3 entity summaries, got %d", len(payload.Sync.Entities))
+	}
+
+	rows, err := srv.store.CanonicalExportRows(context.Background())
+	if err != nil {
+		t.Fatalf("canonical rows: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 canonical rows, got %d", len(rows))
+	}
+
+	for _, entity := range []string{"daily_activity", "daily_readiness", "sleep"} {
+		cursor, _, err := srv.store.SyncState(context.Background(), "oura", entity)
+		if err != nil {
+			t.Fatalf("read sync state for %s: %v", entity, err)
+		}
+		if cursor != "2026-03-20" {
+			t.Fatalf("expected cursor 2026-03-20 for %s, got %q", entity, cursor)
+		}
+	}
+}
+
+func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {
+	srv := newTestServer(t)
+	requests := map[string][]string{}
+	srv.oura = oura.NewClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			rangeKey := req.URL.Query().Get("start_date") + ".." + req.URL.Query().Get("end_date")
+			requests[req.URL.Path] = append(requests[req.URL.Path], rangeKey)
+			return jsonResponse(http.StatusOK, `{"data":[]}`), nil
+		}),
+	})
+
+	saveJSON(t, srv, `{
+		"user_timezone":"Europe/London",
+		"providers":[
+			{
+				"provider":"fitbit",
+				"client_id":"",
+				"client_secret":"",
+				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
+				"default_scopes":"activity heartrate sleep profile",
+				"notes":"Fitbit notes"
+			},
+			{
+				"provider":"oura",
+				"client_id":"oura-client",
+				"client_secret":"oura-secret",
+				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
+				"default_scopes":"email personal daily",
+				"notes":"Oura notes"
+			}
+		]
+	}`)
+
+	if err := srv.store.UpsertConnection(context.Background(), store.Connection{
+		Provider:    "oura",
+		AccessToken: "oura-access",
+		Status:      "connected",
+		ConnectedAt: "2026-03-20T08:00:00Z",
+	}); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+	for _, entity := range []string{"daily_activity", "daily_readiness", "sleep"} {
+		if err := srv.store.UpsertSyncState(context.Background(), "oura", entity, "2026-03-20", "2026-03-20T09:00:00Z"); err != nil {
+			t.Fatalf("seed sync state for %s: %v", entity, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/providers/oura/sync", strings.NewReader(`{"end_date":"2026-03-24"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	for _, path := range []string{
+		"/v2/usercollection/daily_activity",
+		"/v2/usercollection/daily_readiness",
+		"/v2/usercollection/sleep",
+	} {
+		ranges := requests[path]
+		if len(ranges) != 1 {
+			t.Fatalf("expected 1 request for %s, got %d", path, len(ranges))
+		}
+		if ranges[0] != "2026-03-17..2026-03-24" {
+			t.Fatalf("expected overlap range for %s, got %q", path, ranges[0])
+		}
+	}
+}
+
+func TestOuraCallbackRedirectsBackToReturnTo(t *testing.T) {
+	srv := newTestServer(t)
+	srv.oura = oura.NewClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host == "api.ouraring.com" && req.URL.Path == "/oauth/token" {
+				return jsonResponse(http.StatusOK, `{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600,"scope":"email personal daily"}`), nil
+			}
+			return jsonResponse(http.StatusNotFound, `{"error":"not found"}`), nil
+		}),
+	})
+
+	saveJSON(t, srv, `{
+		"user_timezone":"Europe/London",
+		"providers":[
+			{
+				"provider":"fitbit",
+				"client_id":"",
+				"client_secret":"",
+				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
+				"default_scopes":"activity heartrate sleep profile",
+				"notes":"Fitbit notes"
+			},
+			{
+				"provider":"oura",
+				"client_id":"oura-client",
+				"client_secret":"oura-secret",
+				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
+				"default_scopes":"email personal daily",
+				"notes":"Oura notes"
+			}
+		]
+	}`)
+
+	if err := srv.store.SetAppSetting(context.Background(), ouraOAuthStateKey, "state-123"); err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+	if err := srv.store.SetAppSetting(context.Background(), ouraOAuthReturnToKey, "http://localhost:5173/"); err != nil {
+		t.Fatalf("set return_to: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth/oura/callback?code=code-123&state=state-123", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected status 302, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "http://localhost:5173/?oauth_provider=oura&oauth_status=connected" {
+		t.Fatalf("unexpected redirect location %q", got)
+	}
+}
+
+func TestOuraRecentReturnsDailyRecordsAndSleepSessions(t *testing.T) {
+	srv := newTestServer(t)
+
+	if err := srv.store.UpsertDailyRecord(context.Background(), store.DailyRecord{
+		Provider:     "oura",
+		RecordKind:   "daily_activity",
+		LocalDate:    "2026-03-21",
+		ZoneOffset:   "+00:00",
+		SourceDevice: "oura-ring",
+		ExternalID:   "activity-21",
+		Summary:      json.RawMessage(`{"steps":11111,"active_calories":333}`),
+	}); err != nil {
+		t.Fatalf("seed daily record: %v", err)
+	}
+
+	duration := 420
+	efficiency := 91.2
+	if err := srv.store.InsertSleepSession(context.Background(), store.SleepSession{
+		Provider:          "oura",
+		LocalDate:         "2026-03-21",
+		ZoneOffset:        "+00:00",
+		ExternalID:        "sleep-21",
+		StartTime:         "2026-03-20T23:10:00+00:00",
+		EndTime:           "2026-03-21T06:10:00+00:00",
+		DurationMinutes:   &duration,
+		EfficiencyPercent: &efficiency,
+		Stages:            json.RawMessage(`{"deep_sleep_duration":5400}`),
+		Metrics:           json.RawMessage(`{"average_heart_rate":54}`),
+	}); err != nil {
+		t.Fatalf("seed sleep session: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/providers/oura/recent", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		DailyRecords  []store.DailyRecord  `json:"daily_records"`
+		SleepSessions []store.SleepSession `json:"sleep_sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if len(payload.DailyRecords) != 1 {
+		t.Fatalf("expected 1 daily record, got %d", len(payload.DailyRecords))
+	}
+	if len(payload.SleepSessions) != 1 {
+		t.Fatalf("expected 1 sleep session, got %d", len(payload.SleepSessions))
+	}
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
 	tempDir := t.TempDir()
 
 	srv, err := New(config.Config{
-		Host:       "127.0.0.1",
-		Port:       8080,
+		Host:       "localhost",
+		Port:       18080,
 		DataDir:    tempDir,
 		DBPath:     tempDir + "/somascope.db",
 		ConfigPath: tempDir + "/config.json",
@@ -219,4 +548,18 @@ func saveJSON(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder
 		t.Fatalf("expected status 200, got %d, body=%s", rec.Code, rec.Body.String())
 	}
 	return rec
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }

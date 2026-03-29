@@ -26,7 +26,7 @@
 make dev
 ```
 
-Then open [http://127.0.0.1:8080](http://127.0.0.1:8080).
+Then open [http://localhost:18080](http://localhost:18080).
 
 ## Notes
 

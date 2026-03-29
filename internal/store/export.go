@@ -8,30 +8,30 @@ import (
 )
 
 type DailyRecord struct {
-	Provider      string
-	RecordKind    string
-	LocalDate     string
-	ZoneOffset    string
-	SourceDevice  string
-	ExternalID    string
-	Summary       json.RawMessage
-	RawDocumentID *int64
+	Provider      string          `json:"provider"`
+	RecordKind    string          `json:"record_kind"`
+	LocalDate     string          `json:"local_date"`
+	ZoneOffset    string          `json:"zone_offset,omitempty"`
+	SourceDevice  string          `json:"source_device,omitempty"`
+	ExternalID    string          `json:"external_id,omitempty"`
+	Summary       json.RawMessage `json:"summary"`
+	RawDocumentID *int64          `json:"raw_document_id,omitempty"`
 }
 
 type SleepSession struct {
-	Provider          string
-	LocalDate         string
-	ZoneOffset        string
-	ExternalID        string
-	StartTime         string
-	EndTime           string
-	DurationMinutes   *int
-	TimeInBedMinutes  *int
-	EfficiencyPercent *float64
-	IsNap             bool
-	Stages            json.RawMessage
-	Metrics           json.RawMessage
-	RawDocumentID     *int64
+	Provider          string          `json:"provider"`
+	LocalDate         string          `json:"local_date"`
+	ZoneOffset        string          `json:"zone_offset,omitempty"`
+	ExternalID        string          `json:"external_id,omitempty"`
+	StartTime         string          `json:"start_time"`
+	EndTime           string          `json:"end_time"`
+	DurationMinutes   *int            `json:"duration_minutes,omitempty"`
+	TimeInBedMinutes  *int            `json:"time_in_bed_minutes,omitempty"`
+	EfficiencyPercent *float64        `json:"efficiency_percent,omitempty"`
+	IsNap             bool            `json:"is_nap,omitempty"`
+	Stages            json.RawMessage `json:"stages,omitempty"`
+	Metrics           json.RawMessage `json:"metrics,omitempty"`
+	RawDocumentID     *int64          `json:"raw_document_id,omitempty"`
 }
 
 type CanonicalExportRow struct {

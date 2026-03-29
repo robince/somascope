@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/robince/somascope/internal/config"
+	"github.com/robince/somascope/internal/oura"
 	"github.com/robince/somascope/internal/settings"
 	"github.com/robince/somascope/internal/store"
 	"github.com/robince/somascope/internal/web"
@@ -30,6 +31,7 @@ type Server struct {
 	spaHandler http.Handler
 	settings   *settings.Store
 	store      *store.Store
+	oura       *oura.Client
 	mux        *http.ServeMux
 }
 
@@ -46,6 +48,7 @@ func New(cfg config.Config, appStore *store.Store, version VersionInfo) (*Server
 		spaHandler: http.FileServerFS(dist),
 		settings:   settings.NewStore(cfg.ConfigPath),
 		store:      appStore,
+		oura:       oura.NewClient(nil),
 		mux:        http.NewServeMux(),
 	}
 	s.routes()
@@ -64,6 +67,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/export/canonical", s.handleExportCanonical)
 	s.mux.HandleFunc("GET /api/v1/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/v1/settings", s.handlePutSettings)
+	s.mux.HandleFunc("GET /api/v1/providers/oura/status", s.handleOuraStatus)
+	s.mux.HandleFunc("GET /api/v1/providers/oura/recent", s.handleOuraRecent)
+	s.mux.HandleFunc("POST /api/v1/providers/oura/auth/start", s.handleOuraAuthStart)
+	s.mux.HandleFunc("GET /oauth/oura/callback", s.handleOuraCallback)
+	s.mux.HandleFunc("POST /api/v1/providers/oura/sync", s.handleOuraSync)
 	s.mux.Handle("/", http.HandlerFunc(s.handleSPA))
 }
 

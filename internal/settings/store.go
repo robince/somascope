@@ -28,6 +28,31 @@ type Store struct {
 	path string
 }
 
+func (s *Store) Provider(name string) (ProviderConfig, error) {
+	fileCfg, err := s.loadFile()
+	if err != nil {
+		return ProviderConfig{}, err
+	}
+
+	for _, provider := range defaultProviders() {
+		if provider.Provider != name {
+			continue
+		}
+		stored := fileCfg.Providers[name]
+		return ProviderConfig{
+			Provider:      name,
+			Configured:    providerConfigured(stored),
+			ClientID:      stored.ClientID,
+			ClientSecret:  stored.ClientSecret,
+			RedirectURI:   stored.RedirectURI,
+			DefaultScopes: stored.DefaultScopes,
+			Notes:         stored.Notes,
+		}, nil
+	}
+
+	return ProviderConfig{}, os.ErrNotExist
+}
+
 type fileSettings struct {
 	Version      int                    `json:"version"`
 	UserTimezone string                 `json:"user_timezone"`
@@ -185,14 +210,14 @@ func defaultProviders() []ProviderConfig {
 	return []ProviderConfig{
 		{
 			Provider:      "fitbit",
-			RedirectURI:   "http://127.0.0.1:8080/oauth/fitbit/callback",
+			RedirectURI:   "http://localhost:18080/oauth/fitbit/callback",
 			DefaultScopes: "activity heartrate sleep profile",
 			Notes:         "Bring your own Fitbit developer app credentials. Secrets stay local on this device.",
 		},
 		{
 			Provider:      "oura",
-			RedirectURI:   "http://127.0.0.1:8080/oauth/oura/callback",
-			DefaultScopes: "daily heartrate personal email",
+			RedirectURI:   "http://localhost:18080/oauth/oura/callback",
+			DefaultScopes: "email personal daily heartrate tag workout session spo2",
 			Notes:         "Bring your own Oura developer app credentials. Secrets stay local on this device.",
 		},
 	}
@@ -217,6 +242,9 @@ func normalizeStored(provider string, stored storedCreds) storedCreds {
 		if defaults.Provider != provider {
 			continue
 		}
+		if legacy := legacyDefaultRedirectURI(provider); stored.RedirectURI == legacy {
+			stored.RedirectURI = defaults.RedirectURI
+		}
 		if stored.RedirectURI == "" {
 			stored.RedirectURI = defaults.RedirectURI
 		}
@@ -228,6 +256,17 @@ func normalizeStored(provider string, stored storedCreds) storedCreds {
 		}
 	}
 	return stored
+}
+
+func legacyDefaultRedirectURI(provider string) string {
+	switch provider {
+	case "fitbit":
+		return "http://127.0.0.1:18080/oauth/fitbit/callback"
+	case "oura":
+		return "http://127.0.0.1:18080/oauth/oura/callback"
+	default:
+		return ""
+	}
 }
 
 func findProvider(providers []ProviderConfig, name string) (ProviderConfig, bool) {

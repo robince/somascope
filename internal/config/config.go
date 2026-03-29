@@ -31,8 +31,8 @@ type Config struct {
 func Load() (Config, error) {
 	defaultDir := DefaultDataDir()
 
-	host := flag.String("host", envOrDefault("SOMASCOPE_HOST", "127.0.0.1"), "Host to bind")
-	port := flag.Int("port", envOrDefaultInt("SOMASCOPE_PORT", 8080), "Port to bind")
+	host := flag.String("host", envOrDefault("SOMASCOPE_HOST", "localhost"), "Host to bind")
+	port := flag.Int("port", envOrDefaultInt("SOMASCOPE_PORT", 18080), "Port to bind")
 	dataDir := flag.String("data-dir", envOrDefault("SOMASCOPE_DATA_DIR", defaultDir), "Data directory")
 	authMode := flag.String("auth-mode", envOrDefault("SOMASCOPE_AUTH_MODE", string(AuthModeBYO)), "OAuth mode: byo or brokered")
 	flag.Parse()
