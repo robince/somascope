@@ -20,9 +20,10 @@ type dashboardOverview struct {
 }
 
 type dashboardOverviewExport struct {
-	CanonicalJSONL     string            `json:"canonical_jsonl"`
-	CanonicalCSV       string            `json:"canonical_csv"`
-	RawJSONLByProvider map[string]string `json:"raw_jsonl_by_provider,omitempty"`
+	CanonicalJSONL       string                            `json:"canonical_jsonl"`
+	CanonicalCSV         string                            `json:"canonical_csv"`
+	RawJSONLByProvider   map[string]string                 `json:"raw_jsonl_by_provider,omitempty"`
+	RawOptionsByProvider map[string]store.RawExportOptions `json:"raw_options_by_provider,omitempty"`
 }
 
 type dashboardOverviewDay struct {
@@ -152,6 +153,18 @@ func (s *Server) buildDashboardOverview(ctx context.Context) (dashboardOverview,
 	}
 	sort.Strings(providers)
 
+	rawOptionsByProvider := map[string]store.RawExportOptions{}
+	for _, provider := range []string{"oura"} {
+		options, err := s.store.RawExportOptions(ctx, provider)
+		if err != nil {
+			return dashboardOverview{}, fmt.Errorf("load raw export options for %s: %w", provider, err)
+		}
+		if len(options.DocumentKinds) == 0 && options.StartDate == "" && options.EndDate == "" {
+			continue
+		}
+		rawOptionsByProvider[provider] = options
+	}
+
 	return dashboardOverview{
 		EarliestDate:  earliestDate,
 		LatestDate:    latestDate,
@@ -163,6 +176,7 @@ func (s *Server) buildDashboardOverview(ctx context.Context) (dashboardOverview,
 			RawJSONLByProvider: map[string]string{
 				"oura": "/api/v1/export/raw?provider=oura&format=jsonl",
 			},
+			RawOptionsByProvider: rawOptionsByProvider,
 		},
 		Daily: daily,
 	}, nil

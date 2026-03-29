@@ -117,7 +117,7 @@ func TestRawExportRowsFiltersByProvider(t *testing.T) {
 		t.Fatalf("insert fitbit raw document: %v", err)
 	}
 
-	rows, err := store.RawExportRows(ctx, "oura")
+	rows, err := store.RawExportRows(ctx, "oura", RawExportFilter{})
 	if err != nil {
 		t.Fatalf("raw export rows: %v", err)
 	}
@@ -132,5 +132,79 @@ func TestRawExportRowsFiltersByProvider(t *testing.T) {
 	}
 	if rows[0].RequestPath != "/v2/usercollection/daily_activity" {
 		t.Fatalf("expected request_path to round-trip, got %q", rows[0].RequestPath)
+	}
+
+	options, err := store.RawExportOptions(ctx, "oura")
+	if err != nil {
+		t.Fatalf("raw export options: %v", err)
+	}
+	if options.StartDate != "2026-03-20" || options.EndDate != "2026-03-20" {
+		t.Fatalf("unexpected raw export date range: %+v", options)
+	}
+	if len(options.DocumentKinds) != 1 || options.DocumentKinds[0] != "daily_activity" {
+		t.Fatalf("unexpected raw export document kinds: %+v", options.DocumentKinds)
+	}
+}
+
+func TestRawExportRowsSupportsDateAndKindFilters(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "somascope.db")
+
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	for _, doc := range []RawDocument{
+		{
+			Provider:     "oura",
+			DocumentKind: "daily_activity",
+			ExternalID:   "activity-1",
+			LocalDate:    "2026-03-20",
+			RequestStart: "2026-03-20",
+			RequestEnd:   "2026-03-20",
+			Payload:      json.RawMessage(`{"id":"activity-1"}`),
+			FetchedAt:    "2026-03-20T10:00:00Z",
+			DocumentKey:  "daily_activity:activity-1",
+		},
+		{
+			Provider:     "oura",
+			DocumentKind: "daily_readiness",
+			ExternalID:   "readiness-1",
+			LocalDate:    "2026-03-21",
+			RequestStart: "2026-03-21",
+			RequestEnd:   "2026-03-21",
+			Payload:      json.RawMessage(`{"id":"readiness-1"}`),
+			FetchedAt:    "2026-03-21T10:00:00Z",
+			DocumentKey:  "daily_readiness:readiness-1",
+		},
+		{
+			Provider:     "oura",
+			DocumentKind: "personal_info",
+			ExternalID:   "profile-1",
+			Payload:      json.RawMessage(`{"id":"profile-1"}`),
+			FetchedAt:    "2026-03-22T10:00:00Z",
+			DocumentKey:  "personal_info:profile-1",
+		},
+	} {
+		if _, err := store.UpsertRawDocument(ctx, doc); err != nil {
+			t.Fatalf("insert raw document %+v: %v", doc.DocumentKind, err)
+		}
+	}
+
+	rows, err := store.RawExportRows(ctx, "oura", RawExportFilter{
+		StartDate:     "2026-03-21",
+		EndDate:       "2026-03-21",
+		DocumentKinds: []string{"daily_readiness", "personal_info"},
+	})
+	if err != nil {
+		t.Fatalf("raw export rows with filters: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 raw export rows after filtering, got %d", len(rows))
+	}
+	if rows[0].DocumentKind != "daily_readiness" || rows[1].DocumentKind != "personal_info" {
+		t.Fatalf("unexpected filtered raw export rows: %+v", rows)
 	}
 }

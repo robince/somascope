@@ -61,6 +61,10 @@ export function formatMonthDay(date: string): string {
   return formatDate(date, { month: "short", day: "numeric" });
 }
 
+export function formatMonthDayYear(date: string): string {
+  return formatDate(date, { month: "short", day: "numeric", year: "numeric" });
+}
+
 export function formatMonthDayCompact(date: string): string {
   return formatDate(date, { month: "short", day: "numeric" }).replace(" ", "\u00a0");
 }
@@ -77,7 +81,7 @@ export function formatRangeLabel(startDate: string, endDate: string): string {
   if (!startDate || !endDate) {
     return "No visible range";
   }
-  return `${formatMonthDay(startDate)} - ${formatMonthDay(endDate)}`;
+  return `${formatMonthDayYear(startDate)} - ${formatMonthDayYear(endDate)}`;
 }
 
 export function isEditableTarget(target: EventTarget | null): boolean {

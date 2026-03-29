@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type DailyRecord struct {
@@ -70,6 +71,28 @@ type RawExportRow struct {
 	RawDocumentID int64           `json:"raw_document_id"`
 	Payload       json.RawMessage `json:"payload"`
 }
+
+type RawExportFilter struct {
+	StartDate     string
+	EndDate       string
+	DocumentKinds []string
+}
+
+type RawExportOptions struct {
+	Provider      string   `json:"provider"`
+	StartDate     string   `json:"start_date,omitempty"`
+	EndDate       string   `json:"end_date,omitempty"`
+	DocumentKinds []string `json:"document_kinds,omitempty"`
+}
+
+const rawExportDateExpr = `
+	CASE
+		WHEN COALESCE(local_date, '') <> '' THEN local_date
+		WHEN COALESCE(request_start, '') <> '' THEN substr(request_start, 1, 10)
+		WHEN COALESCE(request_end, '') <> '' THEN substr(request_end, 1, 10)
+		ELSE ''
+	END
+`
 
 func (s *Store) UpsertDailyRecord(ctx context.Context, record DailyRecord) error {
 	_, err := s.db.ExecContext(ctx, `
@@ -229,8 +252,67 @@ func (s *Store) CanonicalExportRows(ctx context.Context) ([]CanonicalExportRow, 
 	return out, rows.Err()
 }
 
-func (s *Store) RawExportRows(ctx context.Context, provider string) ([]RawExportRow, error) {
-	const query = `
+func (s *Store) RawExportOptions(ctx context.Context, provider string) (RawExportOptions, error) {
+	options := RawExportOptions{Provider: provider}
+
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT
+			COALESCE(MIN(NULLIF(%s, '')), ''),
+			COALESCE(MAX(NULLIF(%s, '')), '')
+		FROM raw_documents
+		WHERE provider = ?
+	`, rawExportDateExpr, rawExportDateExpr), provider).Scan(&options.StartDate, &options.EndDate); err != nil {
+		return RawExportOptions{}, fmt.Errorf("query raw export date range: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT document_kind
+		FROM raw_documents
+		WHERE provider = ? AND document_kind <> ''
+		ORDER BY document_kind;
+	`, provider)
+	if err != nil {
+		return RawExportOptions{}, fmt.Errorf("query raw export document kinds: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var kind string
+		if err := rows.Scan(&kind); err != nil {
+			return RawExportOptions{}, fmt.Errorf("scan raw export document kind: %w", err)
+		}
+		options.DocumentKinds = append(options.DocumentKinds, kind)
+	}
+
+	return options, rows.Err()
+}
+
+func (s *Store) RawExportRows(ctx context.Context, provider string, filter RawExportFilter) ([]RawExportRow, error) {
+	conditions := []string{"provider = ?"}
+	args := []any{provider}
+
+	startDate := strings.TrimSpace(filter.StartDate)
+	if startDate != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s = '' OR %s >= ?)", rawExportDateExpr, rawExportDateExpr))
+		args = append(args, startDate)
+	}
+
+	endDate := strings.TrimSpace(filter.EndDate)
+	if endDate != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s = '' OR %s <= ?)", rawExportDateExpr, rawExportDateExpr))
+		args = append(args, endDate)
+	}
+
+	documentKinds := compactStrings(filter.DocumentKinds)
+	if len(documentKinds) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(documentKinds)), ",")
+		conditions = append(conditions, "document_kind IN ("+placeholders+")")
+		for _, kind := range documentKinds {
+			args = append(args, kind)
+		}
+	}
+
+	query := fmt.Sprintf(`
 		SELECT
 			'raw_document' AS record_type,
 			provider,
@@ -247,11 +329,11 @@ func (s *Store) RawExportRows(ctx context.Context, provider string) ([]RawExport
 			id,
 			payload_json
 		FROM raw_documents
-		WHERE provider = ?
-		ORDER BY COALESCE(local_date, '') DESC, fetched_at DESC, id DESC;
-	`
+		WHERE %s
+		ORDER BY %s DESC, fetched_at DESC, id DESC;
+	`, strings.Join(conditions, "\n\t\t\tAND "), rawExportDateExpr)
 
-	rows, err := s.db.QueryContext(ctx, query, provider)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query raw export rows: %w", err)
 	}
@@ -284,6 +366,27 @@ func (s *Store) RawExportRows(ctx context.Context, provider string) ([]RawExport
 	}
 
 	return out, rows.Err()
+}
+
+func compactStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func boolToInt(value bool) int {

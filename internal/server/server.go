@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/robince/somascope/internal/config"
 	"github.com/robince/somascope/internal/oura"
@@ -230,7 +231,26 @@ func (s *Server) handleExportRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.store.RawExportRows(r.Context(), provider)
+	startDate, err := exportDateParam(r, "start_date")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	endDate, err := exportDateParam(r, "end_date")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if startDate != "" && endDate != "" && startDate > endDate {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("start_date must be on or before end_date"))
+		return
+	}
+
+	rows, err := s.store.RawExportRows(r.Context(), provider, store.RawExportFilter{
+		StartDate:     startDate,
+		EndDate:       endDate,
+		DocumentKinds: exportListParam(r, "document_kind"),
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -285,6 +305,36 @@ func (s *Server) handleExportRaw(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported export format %q", format))
 	}
+}
+
+func exportDateParam(r *http.Request, key string) (string, error) {
+	value := strings.TrimSpace(r.URL.Query().Get(key))
+	if value == "" {
+		return "", nil
+	}
+	if _, err := time.Parse("2006-01-02", value); err != nil {
+		return "", fmt.Errorf("%s must use YYYY-MM-DD", key)
+	}
+	return value, nil
+}
+
+func exportListParam(r *http.Request, key string) []string {
+	values := r.URL.Query()[key]
+	if len(values) == 0 {
+		return nil
+	}
+
+	var out []string
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {

@@ -23,6 +23,7 @@ const (
 	defaultRetryAttempts      = 4
 	defaultRequestWindow      = 5 * time.Minute
 	defaultRequestBudget      = 3000
+	defaultSparseProbeDays    = 30
 )
 
 type SyncOptions struct {
@@ -46,6 +47,7 @@ type syncEntity struct {
 	useCursor     bool
 	requestWindow func(time.Time) syncRequestWindow
 	normalize     func(context.Context, *store.Store, map[string]any, string, *int64) error
+	sparseProbe   bool
 }
 
 type syncRequestWindow struct {
@@ -168,21 +170,21 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 func syncEntities() []syncEntity {
 	return []syncEntity{
 		{kind: "personal_info", featurePath: "/v2/usercollection/personal_info", queryMode: queryModeNone},
-		{kind: "tag", featurePath: "/v2/usercollection/tag", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
-		{kind: "enhanced_tag", featurePath: "/v2/usercollection/enhanced_tag", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
-		{kind: "workout", featurePath: "/v2/usercollection/workout", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
-		{kind: "session", featurePath: "/v2/usercollection/session", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "tag", featurePath: "/v2/usercollection/tag", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow, sparseProbe: true},
+		{kind: "enhanced_tag", featurePath: "/v2/usercollection/enhanced_tag", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow, sparseProbe: true},
+		{kind: "workout", featurePath: "/v2/usercollection/workout", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow, sparseProbe: true},
+		{kind: "session", featurePath: "/v2/usercollection/session", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow, sparseProbe: true},
 		{kind: "daily_activity", featurePath: "/v2/usercollection/daily_activity", queryMode: queryModeDate, useCursor: true, requestWindow: nextDayExclusiveDateWindow, normalize: applyDailyActivity},
 		{kind: "daily_sleep", featurePath: "/v2/usercollection/daily_sleep", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
 		{kind: "daily_spo2", featurePath: "/v2/usercollection/daily_spo2", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
 		{kind: "daily_readiness", featurePath: "/v2/usercollection/daily_readiness", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow, normalize: applyDailyReadiness},
 		{kind: "sleep", featurePath: "/v2/usercollection/sleep", queryMode: queryModeDate, useCursor: true, requestWindow: sleepResultDayWindow, normalize: applySleep},
 		{kind: "sleep_time", featurePath: "/v2/usercollection/sleep_time", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
-		{kind: "rest_mode_period", featurePath: "/v2/usercollection/rest_mode_period", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "rest_mode_period", featurePath: "/v2/usercollection/rest_mode_period", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow, sparseProbe: true},
 		{kind: "daily_stress", featurePath: "/v2/usercollection/daily_stress", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
 		{kind: "daily_resilience", featurePath: "/v2/usercollection/daily_resilience", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
 		{kind: "daily_cardiovascular_age", featurePath: "/v2/usercollection/daily_cardiovascular_age", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
-		{kind: "vo2_max", featurePath: "/v2/usercollection/vO2_max", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow},
+		{kind: "vo2_max", featurePath: "/v2/usercollection/vO2_max", queryMode: queryModeDate, useCursor: true, requestWindow: inclusiveDateWindow, sparseProbe: true},
 		{kind: "heartrate", featurePath: "/v2/usercollection/heartrate", queryMode: queryModeDateTime, useCursor: true, requestWindow: halfOpenDateTimeWindow},
 	}
 }
@@ -263,57 +265,12 @@ func syncEntityRange(ctx context.Context, st *store.Store, client *Client, acces
 		return err
 	}
 
+	if entity.sparseProbe {
+		return syncSparseEntityRange(ctx, st, client, accessToken, fetchedAt, entity, startDate, endDate, tracker)
+	}
+
 	for day := startDate; !day.After(endDate); day = day.AddDate(0, 0, 1) {
-		window := entity.requestWindow(day)
-		chunkLabel := window.logicalDate
-		if chunkLabel == "" {
-			chunkLabel = day.Format(dateLayout)
-		}
-		if err := tracker.StartChunk(entity.kind, chunkLabel, chunkLabel); err != nil {
-			return err
-		}
-
-		pages, err := client.FetchCollectionPages(ctx, accessToken, entity.featurePath, window.params, RetryConfig{
-			MaxAttempts: defaultRetryAttempts,
-			OnRetry:     retryCallback(tracker, entity, chunkLabel, chunkLabel),
-		})
-		if err != nil {
-			return failEntity(tracker, entity, chunkLabel, chunkLabel, "fetch_collection", err)
-		}
-
-		rowsWritten := 0
-		for _, page := range pages {
-			if !shouldArchiveCollectionPage(page) {
-				continue
-			}
-			pageWindow := window
-			pageWindow.params = page.Query
-			rawID, archiveErr := archiveRawResponse(ctx, st, entity, pageWindow, page.RawBody, fetchedAt, &day)
-			if archiveErr != nil {
-				return failEntity(tracker, entity, chunkLabel, chunkLabel, "archive_raw_response", archiveErr)
-			}
-
-			if entity.normalize == nil {
-				rowsWritten++
-				continue
-			}
-
-			for _, item := range page.Data {
-				if err := entity.normalize(ctx, st, item, fetchedAt, &rawID); err != nil {
-					return failEntity(tracker, entity, chunkLabel, chunkLabel, "apply_document", err)
-				}
-				rowsWritten++
-			}
-		}
-
-		cursor := ""
-		if entity.useCursor {
-			cursor = chunkLabel
-			if err := st.UpsertSyncState(ctx, "oura", entity.kind, cursor, fetchedAt); err != nil {
-				return failEntity(tracker, entity, chunkLabel, chunkLabel, "update_sync_state", err)
-			}
-		}
-		if err := tracker.CompleteChunk(entity.kind, cursor, rowsWritten); err != nil {
+		if err := syncEntityDay(ctx, st, client, accessToken, fetchedAt, entity, day, tracker); err != nil {
 			return err
 		}
 	}
@@ -321,8 +278,130 @@ func syncEntityRange(ctx context.Context, st *store.Store, client *Client, acces
 	return tracker.CompleteEntity(entity.kind)
 }
 
+func syncSparseEntityRange(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker) error {
+	for blockStart := startDate; !blockStart.After(endDate); blockStart = blockStart.AddDate(0, 0, defaultSparseProbeDays) {
+		blockEnd := minDate(endDate, blockStart.AddDate(0, 0, defaultSparseProbeDays-1))
+		if err := syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, blockStart, blockEnd, tracker); err != nil {
+			return err
+		}
+	}
+	return tracker.CompleteEntity(entity.kind)
+}
+
+func syncSparseProbeBlock(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker) error {
+	if startDate.After(endDate) {
+		return nil
+	}
+	if startDate.Equal(endDate) {
+		return syncEntityDay(ctx, st, client, accessToken, fetchedAt, entity, startDate, tracker)
+	}
+
+	chunkStart := startDate.Format(dateLayout)
+	chunkEnd := endDate.Format(dateLayout)
+	window := inclusiveDateSpanWindow(startDate, endDate)
+	pages, err := client.FetchCollectionPages(ctx, accessToken, entity.featurePath, window.params, RetryConfig{
+		MaxAttempts: defaultRetryAttempts,
+		OnRetry:     retryCallback(tracker, entity, chunkStart, chunkEnd),
+	})
+	if err != nil {
+		return failEntity(tracker, entity, chunkStart, chunkEnd, "fetch_collection", err)
+	}
+	if !collectionPagesContainData(pages) {
+		return skipSparseRange(ctx, st, fetchedAt, entity, startDate, endDate, tracker)
+	}
+
+	dayCount := daysInclusive(startDate, endDate)
+	leftCount := dayCount / 2
+	leftEnd := startDate.AddDate(0, 0, leftCount-1)
+	rightStart := leftEnd.AddDate(0, 0, 1)
+	if err := syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, startDate, leftEnd, tracker); err != nil {
+		return err
+	}
+	return syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, rightStart, endDate, tracker)
+}
+
+func skipSparseRange(ctx context.Context, st *store.Store, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker) error {
+	for day := startDate; !day.After(endDate); day = day.AddDate(0, 0, 1) {
+		chunkLabel := day.Format(dateLayout)
+		if err := tracker.StartChunk(entity.kind, chunkLabel, chunkLabel); err != nil {
+			return err
+		}
+		cursor := ""
+		if entity.useCursor {
+			cursor = chunkLabel
+			if err := st.UpsertSyncState(ctx, "oura", entity.kind, cursor, fetchedAt); err != nil {
+				return failEntity(tracker, entity, chunkLabel, chunkLabel, "update_sync_state", err)
+			}
+		}
+		if err := tracker.CompleteChunk(entity.kind, cursor, 0); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncEntityDay(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, day time.Time, tracker *providersync.Tracker) error {
+	window := entity.requestWindow(day)
+	chunkLabel := window.logicalDate
+	if chunkLabel == "" {
+		chunkLabel = day.Format(dateLayout)
+	}
+	if err := tracker.StartChunk(entity.kind, chunkLabel, chunkLabel); err != nil {
+		return err
+	}
+
+	pages, err := client.FetchCollectionPages(ctx, accessToken, entity.featurePath, window.params, RetryConfig{
+		MaxAttempts: defaultRetryAttempts,
+		OnRetry:     retryCallback(tracker, entity, chunkLabel, chunkLabel),
+	})
+	if err != nil {
+		return failEntity(tracker, entity, chunkLabel, chunkLabel, "fetch_collection", err)
+	}
+
+	rowsWritten := 0
+	for _, page := range pages {
+		if !shouldArchiveCollectionPage(page) {
+			continue
+		}
+		pageWindow := window
+		pageWindow.params = page.Query
+		rawID, archiveErr := archiveRawResponse(ctx, st, entity, pageWindow, page.RawBody, fetchedAt, &day)
+		if archiveErr != nil {
+			return failEntity(tracker, entity, chunkLabel, chunkLabel, "archive_raw_response", archiveErr)
+		}
+
+		if entity.normalize == nil {
+			rowsWritten++
+			continue
+		}
+
+		for _, item := range page.Data {
+			if err := entity.normalize(ctx, st, item, fetchedAt, &rawID); err != nil {
+				return failEntity(tracker, entity, chunkLabel, chunkLabel, "apply_document", err)
+			}
+			rowsWritten++
+		}
+	}
+
+	cursor := ""
+	if entity.useCursor {
+		cursor = chunkLabel
+		if err := st.UpsertSyncState(ctx, "oura", entity.kind, cursor, fetchedAt); err != nil {
+			return failEntity(tracker, entity, chunkLabel, chunkLabel, "update_sync_state", err)
+		}
+	}
+	if err := tracker.CompleteChunk(entity.kind, cursor, rowsWritten); err != nil {
+		return err
+	}
+	return nil
+}
+
 func shouldArchiveCollectionPage(page CollectionPage) bool {
 	return len(page.Data) > 0 || strings.TrimSpace(page.NextToken) != ""
+}
+
+func collectionPagesContainData(pages []CollectionPage) bool {
+	return slices.ContainsFunc(pages, shouldArchiveCollectionPage)
 }
 
 func retryCallback(tracker *providersync.Tracker, entity syncEntity, chunkStartDate, chunkEndDate string) func(*APIError, time.Duration) {
@@ -445,6 +524,19 @@ func inclusiveDateWindow(day time.Time) syncRequestWindow {
 		requestStart: date,
 		requestEnd:   date,
 		logicalDate:  date,
+	}
+}
+
+func inclusiveDateSpanWindow(startDate, endDate time.Time) syncRequestWindow {
+	start := startDate.Format(dateLayout)
+	end := endDate.Format(dateLayout)
+	params := url.Values{}
+	params.Set("start_date", start)
+	params.Set("end_date", end)
+	return syncRequestWindow{
+		params:       params,
+		requestStart: start,
+		requestEnd:   end,
 	}
 }
 
@@ -700,6 +792,13 @@ func minDate(left, right time.Time) time.Time {
 		return left
 	}
 	return right
+}
+
+func daysInclusive(startDate, endDate time.Time) int {
+	if startDate.After(endDate) {
+		return 0
+	}
+	return int(endDate.Sub(startDate).Hours()/24) + 1
 }
 
 func isoTime(value time.Time) string {

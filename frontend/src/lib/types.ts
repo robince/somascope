@@ -205,8 +205,16 @@ export type DashboardOverview = {
     canonical_jsonl: string;
     canonical_csv: string;
     raw_jsonl_by_provider?: Partial<Record<ProviderName, string>>;
+    raw_options_by_provider?: Partial<Record<ProviderName, RawExportOptions>>;
   };
   daily: DashboardDay[];
+};
+
+export type RawExportOptions = {
+  provider: ProviderName;
+  start_date?: string;
+  end_date?: string;
+  document_kinds: string[];
 };
 
 export type AppView = "dashboard" | "settings";

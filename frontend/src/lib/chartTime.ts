@@ -20,24 +20,34 @@ type ChartTimeAxisOptions = {
 };
 
 const DEFAULT_MIN_TICK_GAP = 56;
+const YEAR_VIEW_MIN_TICK_GAP = 48;
 const formatMonthDayTick = utcFormat("%b %-d");
 const formatMonthTick = utcFormat("%b");
 
 export function buildChartTimeAxis(options: ChartTimeAxisOptions) {
   const domainStart = parseUTCDate(options.startDate);
   const domainEndExclusive = addUtcDays(parseUTCDate(options.endDate), 1);
+  const minTickGap = options.periodId === "1y"
+    ? YEAR_VIEW_MIN_TICK_GAP
+    : (options.minTickGap ?? DEFAULT_MIN_TICK_GAP);
   const scale = scaleUtc()
     .domain([domainStart, domainEndExclusive])
     .range([options.padLeft, options.width - options.padRight]);
 
-  const rawTicks = buildRawTickDates(options.periodId, domainStart, domainEndExclusive);
+  const rawTicks = buildRawTickDates(
+    options.periodId,
+    domainStart,
+    domainEndExclusive,
+    options.width - options.padLeft - options.padRight,
+    minTickGap
+  );
   const ticks = filterTicksBySpacing(
     rawTicks.map((date) => ({
       date: formatISODate(date),
       label: formatTick(date, options.periodId),
       x: scale(date)
     })),
-    options.minTickGap ?? DEFAULT_MIN_TICK_GAP
+    minTickGap
   );
 
   return {
@@ -60,7 +70,13 @@ export function buildChartTimeAxis(options: ChartTimeAxisOptions) {
   };
 }
 
-function buildRawTickDates(periodId: PeriodId, start: Date, endExclusive: Date): Date[] {
+function buildRawTickDates(
+  periodId: PeriodId,
+  start: Date,
+  endExclusive: Date,
+  innerWidth: number,
+  minTickGap: number
+): Date[] {
   if (periodId === "1w") {
     return utcDay.range(start, endExclusive);
   }
@@ -69,7 +85,25 @@ function buildRawTickDates(periodId: PeriodId, start: Date, endExclusive: Date):
     return utcMonday.range(start, endExclusive);
   }
 
+  if (periodId === "1y") {
+    return buildYearTickDates(start, endExclusive, innerWidth, minTickGap);
+  }
+
   return utcMonth.range(start, endExclusive);
+}
+
+function buildYearTickDates(start: Date, endExclusive: Date, innerWidth: number, minTickGap: number): Date[] {
+  const firstMonth = utcMonth.ceil(start);
+  const monthlyTicks = utcMonth.range(firstMonth, endExclusive);
+
+  if (monthlyTicks.length <= 1) {
+    return monthlyTicks;
+  }
+
+  const maxTickCount = Math.max(Math.floor(innerWidth / minTickGap) + 1, 1);
+  const monthStep = Math.max(1, Math.ceil(monthlyTicks.length / maxTickCount));
+
+  return utcMonth.every(monthStep)?.range(firstMonth, endExclusive) ?? monthlyTicks;
 }
 
 function formatTick(date: Date, periodId: PeriodId): string {

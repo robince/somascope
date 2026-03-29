@@ -282,6 +282,64 @@ func TestRawExportJSONLFiltersByProvider(t *testing.T) {
 	}
 }
 
+func TestRawExportJSONLFiltersByDateAndDocumentKind(t *testing.T) {
+	srv := newTestServer(t)
+
+	for _, doc := range []store.RawDocument{
+		{
+			Provider:     "oura",
+			DocumentKind: "daily_activity",
+			ExternalID:   "activity-1",
+			LocalDate:    "2026-03-20",
+			RequestStart: "2026-03-20",
+			RequestEnd:   "2026-03-20",
+			Payload:      json.RawMessage(`{"id":"activity-1"}`),
+			FetchedAt:    "2026-03-20T08:00:00Z",
+			DocumentKey:  "daily_activity:activity-1",
+		},
+		{
+			Provider:     "oura",
+			DocumentKind: "daily_readiness",
+			ExternalID:   "readiness-1",
+			LocalDate:    "2026-03-21",
+			RequestStart: "2026-03-21",
+			RequestEnd:   "2026-03-21",
+			Payload:      json.RawMessage(`{"id":"readiness-1"}`),
+			FetchedAt:    "2026-03-21T08:00:00Z",
+			DocumentKey:  "daily_readiness:readiness-1",
+		},
+		{
+			Provider:     "oura",
+			DocumentKind: "personal_info",
+			ExternalID:   "profile-1",
+			Payload:      json.RawMessage(`{"id":"profile-1"}`),
+			FetchedAt:    "2026-03-22T08:00:00Z",
+			DocumentKey:  "personal_info:profile-1",
+		},
+	} {
+		if _, err := srv.store.UpsertRawDocument(context.Background(), doc); err != nil {
+			t.Fatalf("seed raw document %s: %v", doc.DocumentKind, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/export/raw?provider=oura&format=jsonl&start_date=2026-03-21&end_date=2026-03-21&document_kind=daily_readiness&document_kind=personal_info", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"document_kind":"daily_readiness"`) {
+		t.Fatalf("expected readiness row in filtered export, got %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"document_kind":"personal_info"`) {
+		t.Fatalf("expected undated personal_info row in filtered export, got %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"document_kind":"daily_activity"`) {
+		t.Fatalf("expected activity row to be excluded by filters, got %s", rec.Body.String())
+	}
+}
+
 func TestOuraAuthStartReturnsAuthorizeURL(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -876,6 +934,35 @@ func TestDashboardOverview(t *testing.T) {
 		t.Fatalf("seed nap session: %v", err)
 	}
 
+	for _, doc := range []store.RawDocument{
+		{
+			Provider:     "oura",
+			DocumentKind: "daily_activity",
+			ExternalID:   "activity-1",
+			LocalDate:    "2026-03-19",
+			RequestStart: "2026-03-19",
+			RequestEnd:   "2026-03-19",
+			Payload:      json.RawMessage(`{"id":"activity-1"}`),
+			FetchedAt:    "2026-03-19T08:00:00Z",
+			DocumentKey:  "daily_activity:activity-1",
+		},
+		{
+			Provider:     "oura",
+			DocumentKind: "sleep",
+			ExternalID:   "sleep-1",
+			LocalDate:    "2026-03-20",
+			RequestStart: "2026-03-20",
+			RequestEnd:   "2026-03-20",
+			Payload:      json.RawMessage(`{"id":"sleep-1"}`),
+			FetchedAt:    "2026-03-20T08:00:00Z",
+			DocumentKey:  "sleep:sleep-1",
+		},
+	} {
+		if _, err := srv.store.UpsertRawDocument(context.Background(), doc); err != nil {
+			t.Fatalf("seed raw document %s: %v", doc.DocumentKind, err)
+		}
+	}
+
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/overview", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -888,9 +975,14 @@ func TestDashboardOverview(t *testing.T) {
 		AvailableDays int      `json:"available_days"`
 		Providers     []string `json:"providers"`
 		ExportURLs    struct {
-			CanonicalCSV       string            `json:"canonical_csv"`
-			CanonicalJSONL     string            `json:"canonical_jsonl"`
-			RawJSONLByProvider map[string]string `json:"raw_jsonl_by_provider"`
+			CanonicalCSV         string            `json:"canonical_csv"`
+			CanonicalJSONL       string            `json:"canonical_jsonl"`
+			RawJSONLByProvider   map[string]string `json:"raw_jsonl_by_provider"`
+			RawOptionsByProvider map[string]struct {
+				StartDate     string   `json:"start_date"`
+				EndDate       string   `json:"end_date"`
+				DocumentKinds []string `json:"document_kinds"`
+			} `json:"raw_options_by_provider"`
 		} `json:"export_urls"`
 		Daily []struct {
 			Date     string `json:"date"`
@@ -929,6 +1021,13 @@ func TestDashboardOverview(t *testing.T) {
 	}
 	if payload.ExportURLs.RawJSONLByProvider["oura"] != "/api/v1/export/raw?provider=oura&format=jsonl" {
 		t.Fatalf("unexpected raw oura export url: %+v", payload.ExportURLs.RawJSONLByProvider)
+	}
+	if payload.ExportURLs.RawOptionsByProvider["oura"].StartDate != "2026-03-19" ||
+		payload.ExportURLs.RawOptionsByProvider["oura"].EndDate != "2026-03-20" {
+		t.Fatalf("unexpected raw oura export range: %+v", payload.ExportURLs.RawOptionsByProvider["oura"])
+	}
+	if strings.Join(payload.ExportURLs.RawOptionsByProvider["oura"].DocumentKinds, ",") != "daily_activity,sleep" {
+		t.Fatalf("unexpected raw oura export document kinds: %+v", payload.ExportURLs.RawOptionsByProvider["oura"].DocumentKinds)
 	}
 	if len(payload.Daily) != 1 {
 		t.Fatalf("expected 1 daily item, got %d", len(payload.Daily))

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { buildChartTimeAxis } from "./chartTime";
   import {
     SLEEP_AXIS_LABELS,
@@ -10,7 +11,7 @@
     minutesToHoursLabel
   } from "./dashboard";
   import { PERIODS, formatRangeLabel, getPeriod, getWindowStart } from "./time";
-  import type { DashboardOverview, OuraStatus, PeriodId } from "./types";
+  import type { DashboardOverview, OuraStatus, PeriodId, RawExportOptions } from "./types";
 
   export let dashboard: DashboardOverview | null = null;
   export let activePeriod: PeriodId = "1m";
@@ -30,11 +31,18 @@
   const CHART_PAD_TOP = 16;
   const CHART_PAD_BOTTOM = 28;
   const SLEEP_CHART_HEIGHT = 240;
+  const SHOW_DAY_BOUNDARY_TICKS = true;
+  const SHOW_HORIZONTAL_GUIDES = false;
   const READINESS_MIN = 40;
   const READINESS_MAX = 100;
   const READINESS_TICKS = [100, 85, 70, 55, 40];
   const SLEEP_AXIS_MAX_MINUTES = 18 * 60;
   type SeriesPoint = { key: string; x: number; y: number };
+  let rawOuraStartDate = "";
+  let rawOuraEndDate = "";
+  let rawOuraSelectedKinds: string[] = [];
+  let rawOuraOptionsSignature = "";
+  let rawOuraTypePickerMenu: HTMLDivElement | null = null;
 
   $: period = getPeriod(activePeriod);
   $: resolvedEndDate = windowEndDate || dashboard?.latest_date || "";
@@ -63,6 +71,10 @@
     chartResolution === "daily" && chartTimeAxis
       ? buildWeekendBands(visibleDays, chartTimeAxis)
       : [];
+  $: boundaryTicks =
+    SHOW_DAY_BOUNDARY_TICKS && chartTimeAxis
+      ? buildBoundaryTicks(buckets, chartTimeAxis)
+      : [];
   $: smoothingWindow = getSmoothingWindow(activePeriod);
   $: smoothingOffset = smoothingWindow % 2 === 0 ? 0.5 : 0;
   $: activitySmoothed = centeredMovingAverage(activityValues, smoothingWindow);
@@ -88,7 +100,21 @@
   $: averageReadiness = averageDefined(visibleDays.map((day) => day.readiness?.score));
   $: averageSleep = averageDefined(visibleDays.map((day) => day.sleep?.duration_minutes));
   $: averageDailySteps = averageDefined(visibleDays.map((day) => day.activity?.steps));
-  $: rawOuraExportURL = dashboard?.export_urls.raw_jsonl_by_provider?.oura ?? "";
+  $: rawOuraExportBaseURL = dashboard?.export_urls.raw_jsonl_by_provider?.oura ?? "";
+  $: rawOuraExportOptions = dashboard?.export_urls.raw_options_by_provider?.oura ?? null;
+  $: rawOuraAvailableKinds = rawOuraExportOptions?.document_kinds ?? [];
+  $: {
+    const nextSignature = JSON.stringify(rawOuraExportOptions ?? null);
+    if (nextSignature !== rawOuraOptionsSignature) {
+      rawOuraOptionsSignature = nextSignature;
+      rawOuraStartDate = rawOuraExportOptions?.start_date ?? "";
+      rawOuraEndDate = rawOuraExportOptions?.end_date ?? "";
+      rawOuraSelectedKinds = [...rawOuraAvailableKinds];
+    }
+  }
+  $: rawOuraSelectedKinds = rawOuraSelectedKinds.filter((kind, index, kinds) => rawOuraAvailableKinds.includes(kind) && kinds.indexOf(kind) === index);
+  $: rawOuraExportURL = buildRawExportURL(rawOuraExportBaseURL, rawOuraStartDate, rawOuraEndDate, rawOuraSelectedKinds);
+  $: rawOuraCanExport = rawOuraAvailableKinds.length === 0 || rawOuraSelectedKinds.length > 0;
 
   function bucketCenterX(index: number, offsetUnits = 0): number {
     const bucket = buckets[index];
@@ -173,6 +199,16 @@
     });
   }
 
+  function buildBoundaryTicks(
+    seriesBuckets: typeof buckets,
+    timeAxis: NonNullable<typeof chartTimeAxis>
+  ): Array<{ date: string; x: number }> {
+    return seriesBuckets.slice(1).map((bucket) => ({
+      date: bucket.start_date,
+      x: timeAxis.bandForRange(bucket.start_date, bucket.start_date).x
+    }));
+  }
+
   function buildPathFromPoints(points: SeriesPoint[]): string {
     let path = "";
     for (const [index, point] of points.entries()) {
@@ -248,6 +284,88 @@
 
   function clamp(value: number, min: number, max: number): number {
     return Math.min(Math.max(value, min), max);
+  }
+
+  function buildRawExportURL(baseURL: string, startDate: string, endDate: string, documentKinds: string[]): string {
+    if (!baseURL) {
+      return "";
+    }
+
+    const url = new URL(baseURL, "http://localhost");
+    if (startDate) {
+      url.searchParams.set("start_date", startDate);
+    } else {
+      url.searchParams.delete("start_date");
+    }
+    if (endDate) {
+      url.searchParams.set("end_date", endDate);
+    } else {
+      url.searchParams.delete("end_date");
+    }
+
+    url.searchParams.delete("document_kind");
+    for (const kind of documentKinds) {
+      url.searchParams.append("document_kind", kind);
+    }
+
+    return `${url.pathname}${url.search}`;
+  }
+
+  function rawExportTypeSummary(documentKinds: string[], selectedKinds: string[]): string {
+    if (!documentKinds.length) {
+      return "Types";
+    }
+    if (selectedKinds.length === documentKinds.length) {
+      return "All types";
+    }
+    if (selectedKinds.length === 0) {
+      return "No types selected";
+    }
+    return `${selectedKinds.length} of ${documentKinds.length} types`;
+  }
+
+  function documentKindLabel(kind: string): string {
+    return kind.replaceAll("_", " ");
+  }
+
+  function toggleRawOuraDocumentKind(kind: string, checked: boolean) {
+    if (checked) {
+      rawOuraSelectedKinds = Array.from(new Set([...rawOuraSelectedKinds, kind]));
+      return;
+    }
+    rawOuraSelectedKinds = rawOuraSelectedKinds.filter((value) => value !== kind);
+  }
+
+  function selectAllRawOuraDocumentKinds() {
+    rawOuraSelectedKinds = [...rawOuraAvailableKinds];
+  }
+
+  function clearAllRawOuraDocumentKinds() {
+    rawOuraSelectedKinds = [];
+  }
+
+  async function handleRawTypePickerToggle(event: Event) {
+    const picker = event.currentTarget as HTMLDetailsElement | null;
+    if (!picker?.open) {
+      return;
+    }
+
+    await tick();
+
+    const menu = rawOuraTypePickerMenu;
+    if (!menu) {
+      return;
+    }
+
+    const viewportPadding = 16;
+    const menuBounds = menu.getBoundingClientRect();
+    const overflowBottom = menuBounds.bottom - (window.innerHeight - viewportPadding);
+    if (overflowBottom > 0) {
+      window.scrollBy({
+        top: overflowBottom,
+        behavior: "smooth"
+      });
+    }
   }
 </script>
 
@@ -358,15 +476,26 @@
                 class="weekend-band"
               />
             {/each}
+            {#each boundaryTicks as tick (tick.date)}
+              <line
+                x1={tick.x}
+                y1={CHART_PAD_TOP}
+                x2={tick.x}
+                y2={CHART_HEIGHT - CHART_PAD_BOTTOM}
+                class="day-boundary-line"
+              />
+            {/each}
             {#each activityTicks as tick}
               {@const y = activityY(tick)}
-              <line
-                x1={CHART_PAD_LEFT}
-                y1={y}
-                x2={CHART_WIDTH - CHART_PAD_RIGHT}
-                y2={y}
-                class="guide-line"
-              />
+              {#if SHOW_HORIZONTAL_GUIDES}
+                <line
+                  x1={CHART_PAD_LEFT}
+                  y1={y}
+                  x2={CHART_WIDTH - CHART_PAD_RIGHT}
+                  y2={y}
+                  class="guide-line"
+                />
+              {/if}
               <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{new Intl.NumberFormat().format(tick)}</text>
             {/each}
 
@@ -436,15 +565,26 @@
                 class="weekend-band"
               />
             {/each}
+            {#each boundaryTicks as tick (tick.date)}
+              <line
+                x1={tick.x}
+                y1={CHART_PAD_TOP}
+                x2={tick.x}
+                y2={CHART_HEIGHT - CHART_PAD_BOTTOM}
+                class="day-boundary-line"
+              />
+            {/each}
             {#each READINESS_TICKS as tick}
               {@const y = readinessY(tick)}
-              <line
-                x1={CHART_PAD_LEFT}
-                y1={y}
-                x2={CHART_WIDTH - CHART_PAD_RIGHT}
-                y2={y}
-                class="guide-line"
-              />
+              {#if SHOW_HORIZONTAL_GUIDES}
+                <line
+                  x1={CHART_PAD_LEFT}
+                  y1={y}
+                  x2={CHART_WIDTH - CHART_PAD_RIGHT}
+                  y2={y}
+                  class="guide-line"
+                />
+              {/if}
               <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{tick}</text>
             {/each}
 
@@ -514,15 +654,26 @@
                 class="weekend-band"
               />
             {/each}
+            {#each boundaryTicks as tick (tick.date)}
+              <line
+                x1={tick.x}
+                y1={CHART_PAD_TOP}
+                x2={tick.x}
+                y2={SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM}
+                class="day-boundary-line"
+              />
+            {/each}
             {#each SLEEP_AXIS_LABELS as tick}
               {@const y = sleepY((tick.percent / 100) * SLEEP_AXIS_MAX_MINUTES)}
-              <line
-                x1={CHART_PAD_LEFT}
-                y1={y}
-                x2={CHART_WIDTH - CHART_PAD_RIGHT}
-                y2={y}
-                class="guide-line"
-              />
+              {#if SHOW_HORIZONTAL_GUIDES}
+                <line
+                  x1={CHART_PAD_LEFT}
+                  y1={y}
+                  x2={CHART_WIDTH - CHART_PAD_RIGHT}
+                  y2={y}
+                  class="guide-line"
+                />
+              {/if}
               <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{tick.label}</text>
             {/each}
 
@@ -607,8 +758,82 @@
             <div class="export-subhead">
               <p class="eyebrow">Raw provider data</p>
             </div>
-            <div class="export-actions">
-              <a class="button button-ghost" href={rawOuraExportURL} download="somascope-oura-raw.jsonl">Oura JSONL</a>
+
+            <div class="provider-export-card">
+              <div class="provider-export-head">
+                <div>
+                  <p class="eyebrow">Raw Data</p>
+                  <h3>Oura</h3>
+                </div>
+              </div>
+
+              <div class="export-actions">
+                {#if rawOuraCanExport}
+                  <a class="button button-ghost" href={rawOuraExportURL} download="somascope-oura-raw.jsonl">Oura Data (JSONL)</a>
+                {:else}
+                  <span class="button button-ghost button-disabled" aria-disabled="true">Choose types</span>
+                {/if}
+              </div>
+
+              {#if rawOuraExportOptions}
+                <div class="raw-export-controls">
+                  <label class="export-field">
+                    <span class="export-field-label">Start date</span>
+                    <input
+                      type="date"
+                      value={rawOuraStartDate}
+                      min={rawOuraExportOptions.start_date}
+                      max={rawOuraEndDate || rawOuraExportOptions.end_date}
+                      oninput={(event) => rawOuraStartDate = (event.currentTarget as HTMLInputElement).value}
+                      onchange={(event) => rawOuraStartDate = (event.currentTarget as HTMLInputElement).value}
+                    />
+                  </label>
+
+                  <label class="export-field">
+                    <span class="export-field-label">End date</span>
+                    <input
+                      type="date"
+                      value={rawOuraEndDate}
+                      min={rawOuraStartDate || rawOuraExportOptions.start_date}
+                      max={rawOuraExportOptions.end_date}
+                      oninput={(event) => rawOuraEndDate = (event.currentTarget as HTMLInputElement).value}
+                      onchange={(event) => rawOuraEndDate = (event.currentTarget as HTMLInputElement).value}
+                    />
+                  </label>
+
+                  {#if rawOuraAvailableKinds.length}
+                    <div class="export-field export-field-wide">
+                      <span class="export-field-label">Types</span>
+                      <details class="type-picker" ontoggle={handleRawTypePickerToggle}>
+                        <summary class="type-picker-summary">
+                          <span>{rawExportTypeSummary(rawOuraAvailableKinds, rawOuraSelectedKinds)}</span>
+                        </summary>
+
+                        <div class="type-picker-menu" bind:this={rawOuraTypePickerMenu}>
+                          <div class="type-picker-actions">
+                            <button class="text-link" type="button" onclick={selectAllRawOuraDocumentKinds}>Select all</button>
+                            <button class="text-link" type="button" onclick={clearAllRawOuraDocumentKinds}>Clear all</button>
+                          </div>
+
+                          <div class="type-option-list">
+                            {#each rawOuraAvailableKinds as kind}
+                              <label class="type-option">
+                                <input
+                                  type="checkbox"
+                                  checked={rawOuraSelectedKinds.includes(kind)}
+                                  oninput={(event) => toggleRawOuraDocumentKind(kind, (event.currentTarget as HTMLInputElement).checked)}
+                                  onchange={(event) => toggleRawOuraDocumentKind(kind, (event.currentTarget as HTMLInputElement).checked)}
+                                />
+                                <span>{documentKindLabel(kind)}</span>
+                              </label>
+                            {/each}
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
@@ -874,6 +1099,12 @@
     stroke-width: 0.8;
   }
 
+  .day-boundary-line {
+    stroke: rgba(24, 32, 25, 0.08);
+    stroke-width: 0.8;
+    shape-rendering: crispEdges;
+  }
+
   .weekend-band {
     fill: rgba(24, 32, 25, 0.045);
   }
@@ -918,6 +1149,33 @@
     gap: 18px;
   }
 
+  .raw-export-controls {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: 150px 150px minmax(220px, 1fr);
+    align-items: end;
+  }
+
+  .provider-export-card {
+    display: grid;
+    gap: 16px;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.56);
+  }
+
+  .provider-export-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  h3 {
+    margin: 0;
+    font-size: 1.1rem;
+  }
+
   .export-subhead {
     display: grid;
     gap: 4px;
@@ -928,6 +1186,93 @@
   .export-subhead-clean {
     padding-top: 0;
     border-top: 0;
+  }
+
+  .export-field {
+    display: grid;
+    gap: 8px;
+  }
+
+  .export-field-wide {
+    grid-column: auto;
+  }
+
+  .export-field-label {
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .export-field input,
+  .type-picker-summary {
+    width: 100%;
+    border-radius: 14px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.74);
+    padding: 12px 14px;
+    font: inherit;
+    color: var(--ink);
+    box-sizing: border-box;
+  }
+
+  .type-picker {
+    position: relative;
+    align-self: start;
+  }
+
+  .type-picker summary {
+    list-style: none;
+    cursor: pointer;
+  }
+
+  .type-picker summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .type-picker-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    z-index: 10;
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 12px 28px rgba(24, 32, 25, 0.08);
+  }
+
+  .type-picker-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .type-option-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .type-option {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    color: var(--ink);
+    text-transform: capitalize;
+  }
+
+  .type-option input {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+  }
+
+  .button-disabled {
+    opacity: 0.55;
+    pointer-events: none;
   }
 
   .sleep-wrap {
@@ -1003,6 +1348,14 @@
     .chart-stat-badge {
       min-width: 102px;
       padding: 8px 10px;
+    }
+
+    .raw-export-controls {
+      grid-template-columns: 1fr;
+    }
+
+    .export-field-wide {
+      grid-column: auto;
     }
   }
 </style>
