@@ -42,14 +42,30 @@
   let activeView: AppView = "dashboard";
   let activePeriod: PeriodId = "1m";
   let windowEndDate = "";
-  let loading = true;
+  let appInfoLoading = true;
+  let formatsLoading = true;
+  let providerSettingsLoading = true;
+  let dashboardLoading = true;
+  let statusLoading = true;
+  let recentLoading = true;
+  let settingsLoading = true;
   let saving = false;
   let ouraBusy = false;
   let dirty = false;
-  let error = "";
+  let appInfoError = "";
+  let formatsError = "";
+  let settingsError = "";
+  let dashboardError = "";
+  let statusError = "";
+  let recentError = "";
+  let actionError = "";
+  let settingsViewError = "";
   let success = "";
   let syncStartDate = "";
   let ouraStatusPollTimer: ReturnType<typeof window.setInterval> | null = null;
+
+  $: settingsLoading = appInfoLoading || formatsLoading || providerSettingsLoading || statusLoading || recentLoading;
+  $: settingsViewError = actionError || statusError || settingsError || recentError || appInfoError || formatsError;
 
   function baseProvider(provider: ProviderSettings["provider"]): ProviderSettings {
     const defaults = PROVIDER_DEFAULTS[provider];
@@ -97,6 +113,37 @@
     activeView = viewFromLocation(window.location.pathname, window.location.hash);
   }
 
+  function consumeOAuthResult() {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+    const provider = url.searchParams.get("oauth_provider");
+    const status = url.searchParams.get("oauth_status");
+
+    if (provider === "oura" && status === "connected") {
+      activeView = "settings";
+      success = "Oura connected locally.";
+      url.searchParams.delete("oauth_provider");
+      url.searchParams.delete("oauth_status");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+  }
+
+  function messageForError(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  async function fetchJSON<T>(input: RequestInfo | URL, fallbackMessage: string): Promise<T> {
+    const response = await fetch(input);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.error || fallbackMessage);
+    }
+    return (await response.json()) as T;
+  }
+
   function syncBusyFromStatus(status: OuraStatus | null) {
     return status?.current_run?.status === "running";
   }
@@ -113,13 +160,14 @@
       return;
     }
     ouraStatusPollTimer = window.setInterval(() => {
-      void refreshOuraStatus();
+      void loadOuraStatus();
     }, 2000);
   }
 
   function applyOuraStatus(status: OuraStatus) {
     const wasBusy = ouraBusy;
     ouraStatus = status;
+    statusError = "";
     ouraBusy = syncBusyFromStatus(status);
     if (ouraBusy) {
       startOuraStatusPolling();
@@ -131,81 +179,108 @@
     }
   }
 
-  async function refreshOuraStatus() {
+  async function loadAppInfo() {
+    appInfoLoading = true;
+    appInfoError = "";
     try {
-      const response = await fetch("/api/v1/providers/oura/status");
-      if (!response.ok) {
-        throw new Error("Failed to refresh Oura sync status.");
-      }
-      const payload: OuraStatus = await response.json();
+      appInfo = await fetchJSON<AppInfo>("/api/v1/app", "Failed to load app info.");
+    } catch (err) {
+      appInfoError = messageForError(err);
+    } finally {
+      appInfoLoading = false;
+    }
+  }
+
+  async function loadFormats() {
+    formatsLoading = true;
+    formatsError = "";
+    try {
+      const payload = await fetchJSON<{ items?: ExportFormat[] }>("/api/v1/export/formats", "Failed to load export formats.");
+      formats = payload.items ?? [];
+    } catch (err) {
+      formatsError = messageForError(err);
+      formats = [];
+    } finally {
+      formatsLoading = false;
+    }
+  }
+
+  async function loadSettingsData() {
+    providerSettingsLoading = true;
+    settingsError = "";
+    try {
+      const payload = await fetchJSON<SettingsPayload>("/api/v1/settings", "Failed to load local settings.");
+      userTimezone = payload.user_timezone || userTimezone;
+      providers = normalizeProviders(payload.providers);
+      dirty = false;
+    } catch (err) {
+      settingsError = messageForError(err);
+      providers = normalizeProviders(undefined);
+    } finally {
+      providerSettingsLoading = false;
+    }
+  }
+
+  async function loadDashboardData() {
+    dashboardLoading = true;
+    dashboardError = "";
+    try {
+      const payload = await fetchJSON<DashboardOverview>("/api/v1/dashboard/overview", "Failed to load dashboard.");
+      dashboard = payload;
+      windowEndDate = clampDate(
+        windowEndDate || payload.latest_date || "",
+        payload.earliest_date,
+        payload.latest_date
+      );
+    } catch (err) {
+      dashboardError = messageForError(err);
+      dashboard = null;
+    } finally {
+      dashboardLoading = false;
+    }
+  }
+
+  async function loadOuraStatus() {
+    statusLoading = true;
+    statusError = "";
+    try {
+      const payload = await fetchJSON<OuraStatus>("/api/v1/providers/oura/status", "Failed to refresh Oura sync status.");
       applyOuraStatus(payload);
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      statusError = messageForError(err);
       stopOuraStatusPolling();
+    } finally {
+      statusLoading = false;
     }
+  }
+
+  async function loadOuraRecent() {
+    recentLoading = true;
+    recentError = "";
+    try {
+      ouraRecent = await fetchJSON<OuraRecent>("/api/v1/providers/oura/recent", "Failed to load recent Oura data.");
+    } catch (err) {
+      recentError = messageForError(err);
+      ouraRecent = { daily_records: [], sleep_sessions: [] };
+    } finally {
+      recentLoading = false;
+    }
+  }
+
+  async function loadInitialData() {
+    actionError = "";
+    await Promise.all([
+      loadAppInfo(),
+      loadFormats(),
+      loadSettingsData(),
+      loadDashboardData(),
+      loadOuraStatus(),
+      loadOuraRecent()
+    ]);
   }
 
   async function refreshPostRunData() {
-    try {
-      const [dashboardRes, recentRes, statusRes] = await Promise.all([
-        fetch("/api/v1/dashboard/overview"),
-        fetch("/api/v1/providers/oura/recent"),
-        fetch("/api/v1/providers/oura/status")
-      ]);
-      if (!dashboardRes.ok || !recentRes.ok || !statusRes.ok) {
-        throw new Error("Failed to refresh Oura data after sync.");
-      }
-      dashboard = await dashboardRes.json();
-      ouraRecent = await recentRes.json();
-      applyOuraStatus(await statusRes.json());
-      windowEndDate = clampDate(windowEndDate || dashboard?.latest_date || "", dashboard?.earliest_date, dashboard?.latest_date);
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  async function load() {
-    loading = true;
-    error = "";
-    success = "";
-
-    try {
-      const [appRes, exportRes, settingsRes, dashboardRes, ouraStatusRes, ouraRecentRes] = await Promise.all([
-        fetch("/api/v1/app"),
-        fetch("/api/v1/export/formats"),
-        fetch("/api/v1/settings"),
-        fetch("/api/v1/dashboard/overview"),
-        fetch("/api/v1/providers/oura/status"),
-        fetch("/api/v1/providers/oura/recent")
-      ]);
-
-      if (!appRes.ok || !exportRes.ok || !settingsRes.ok || !dashboardRes.ok || !ouraStatusRes.ok || !ouraRecentRes.ok) {
-        throw new Error("Failed to load dashboard and settings.");
-      }
-
-      appInfo = await appRes.json();
-      const exportPayload = await exportRes.json();
-      const settingsPayload: SettingsPayload = await settingsRes.json();
-      const dashboardPayload: DashboardOverview = await dashboardRes.json();
-      const ouraStatusPayload: OuraStatus = await ouraStatusRes.json();
-      ouraRecent = await ouraRecentRes.json();
-
-      formats = exportPayload.items ?? [];
-      dashboard = dashboardPayload;
-      applyOuraStatus(ouraStatusPayload);
-      userTimezone = settingsPayload.user_timezone || userTimezone;
-      providers = normalizeProviders(settingsPayload.providers);
-      dirty = false;
-      windowEndDate = clampDate(
-        windowEndDate || dashboardPayload.latest_date || "",
-        dashboardPayload.earliest_date,
-        dashboardPayload.latest_date
-      );
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
-    } finally {
-      loading = false;
-    }
+    await Promise.all([loadDashboardData(), loadOuraRecent(), loadOuraStatus()]);
   }
 
   async function scrollToAnchor(anchor: string) {
@@ -236,21 +311,23 @@
     );
     dirty = true;
     success = "";
+    actionError = "";
   }
 
   function updateTimezone(value: string) {
     userTimezone = value;
     dirty = true;
     success = "";
+    actionError = "";
   }
 
   function resetUnsaved() {
-    void load();
+    void loadSettingsData();
   }
 
   async function save() {
     saving = true;
-    error = "";
+    actionError = "";
     success = "";
 
     try {
@@ -274,13 +351,14 @@
       });
 
       if (!response.ok) {
-        throw new Error("Failed to save local settings.");
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || "Failed to save local settings.");
       }
 
-      await load();
+      await Promise.all([loadSettingsData(), loadOuraStatus()]);
       success = "Saved locally. Secrets are not re-displayed after write.";
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      actionError = messageForError(err);
     } finally {
       saving = false;
     }
@@ -288,7 +366,7 @@
 
   async function connectOura() {
     ouraBusy = true;
-    error = "";
+    actionError = "";
     success = "";
 
     try {
@@ -302,7 +380,8 @@
         })
       });
       if (!response.ok) {
-        throw new Error("Failed to start Oura authorization.");
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || "Failed to start Oura authorization.");
       }
       const payload = await response.json();
       if (!payload.authorize_url) {
@@ -310,13 +389,13 @@
       }
       window.location.href = payload.authorize_url;
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      actionError = messageForError(err);
       ouraBusy = false;
     }
   }
 
   async function syncOura(options?: { startDate?: string; modeLabel?: string }) {
-    error = "";
+    actionError = "";
     success = "";
 
     try {
@@ -324,6 +403,7 @@
       if (options?.startDate) {
         body.start_date = options.startDate;
       }
+
       const response = await fetch("/api/v1/providers/oura/sync", {
         method: "POST",
         headers: {
@@ -331,6 +411,7 @@
         },
         body: JSON.stringify(body)
       });
+
       const payload = await response.json().catch(() => null);
       if (response.status === 409) {
         if (payload?.current_run) {
@@ -349,9 +430,11 @@
         success = "Oura sync is already running in the local app.";
         return;
       }
+
       if (!response.ok) {
         throw new Error(payload?.error || "Failed to sync Oura data.");
       }
+
       if (payload?.run) {
         applyOuraStatus({
           ...(ouraStatus ?? {
@@ -368,10 +451,11 @@
         ouraBusy = true;
         startOuraStatusPolling();
       }
+
       const modeLabel = options?.modeLabel ?? (payload?.run?.mode === "backfill" ? "Backfill" : "Update");
       success = `${modeLabel} started. The local app will keep syncing even if you refresh this page.`;
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      actionError = messageForError(err);
     }
   }
 
@@ -381,10 +465,11 @@
 
   async function syncOuraFromDate() {
     if (!syncStartDate) {
-      error = "Choose a backfill start date first.";
+      actionError = "Choose a backfill start date first.";
       success = "";
       return;
     }
+
     await syncOura({
       startDate: syncStartDate,
       modeLabel: "Backfill"
@@ -446,7 +531,8 @@
 
   onMount(() => {
     syncViewFromLocation();
-    void load();
+    consumeOAuthResult();
+    void loadInitialData();
   });
 
   onDestroy(() => {
@@ -479,10 +565,10 @@
       {formats}
       {activePeriod}
       {windowEndDate}
-      {loading}
+      loading={dashboardLoading}
       {ouraBusy}
       {ouraStatus}
-      {error}
+      error={dashboardError}
       onSelectPeriod={selectPeriod}
       onShiftWindow={shiftWindow}
       onOpenSettings={(anchor?: string) => void setActiveView("settings", anchor)}
@@ -498,22 +584,24 @@
       {ouraStatus}
       {ouraRecent}
       {userTimezone}
-      {loading}
+      loading={settingsLoading}
+      {statusLoading}
+      statusError={statusError}
       {saving}
       {ouraBusy}
       {syncStartDate}
       {dirty}
-      {error}
+      error={settingsViewError}
       {success}
       onReset={resetUnsaved}
       onSave={save}
-      onRefresh={() => void load()}
+      onRefresh={() => void Promise.all([loadOuraStatus(), loadOuraRecent()])}
       onConnectOura={() => void connectOura()}
       onSyncOura={() => void syncOuraIncremental()}
       onSyncOuraFromDate={() => void syncOuraFromDate()}
       onSyncStartDateInput={(value: string) => {
         syncStartDate = value;
-        error = "";
+        actionError = "";
         success = "";
       }}
       onTimezoneInput={updateTimezone}

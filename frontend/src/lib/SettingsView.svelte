@@ -8,6 +8,8 @@
   export let ouraRecent: OuraRecent = { daily_records: [], sleep_sessions: [] };
   export let userTimezone = "";
   export let loading = false;
+  export let statusLoading = false;
+  export let statusError = "";
   export let saving = false;
   export let ouraBusy = false;
   export let syncStartDate = "";
@@ -57,6 +59,26 @@
   function entityLabel(value: string | undefined): string {
     return value ? value.replaceAll("_", " ") : "--";
   }
+
+  function handleSyncStartDateEvent(event: Event) {
+    onSyncStartDateInput((event.currentTarget as HTMLInputElement).value);
+  }
+
+  function connectionLabel(status: OuraStatus | null, loadingStatus: boolean, statusMessage: string): string {
+    if (status?.connected) {
+      return "Connected";
+    }
+    if (loadingStatus) {
+      return "Checking...";
+    }
+    if (statusMessage) {
+      return "Status unavailable";
+    }
+    if (status) {
+      return "Not connected";
+    }
+    return "Unknown";
+  }
 </script>
 
 <section class="settings-shell">
@@ -90,7 +112,7 @@
       <dl class="stack">
         <div class="stack-row">
           <dt>Connection</dt>
-          <dd>{ouraStatus?.connected ? "Connected" : "Not connected"}</dd>
+          <dd>{connectionLabel(ouraStatus, statusLoading, statusError)}</dd>
         </div>
         <div class="stack-row">
           <dt>Daily records</dt>
@@ -126,6 +148,19 @@
       Once a sync starts, it keeps running in the local app even if you refresh this page.
     </p>
 
+    {#if statusLoading}
+      <p class="status-copy">Checking local Oura connection status...</p>
+    {:else if statusError}
+      <p class="status-copy error">
+        Oura status could not be loaded from the local app. {statusError}
+      </p>
+    {:else if !ouraStatus?.connected}
+      <p class="status-copy warning">
+        Oura sync actions are disabled until this app is connected to Oura. Save local credentials if needed,
+        then use <strong>Connect Oura</strong> below.
+      </p>
+    {/if}
+
     <div class="sync-grid">
       <article class="sync-card">
         <strong>Backfill from date</strong>
@@ -135,16 +170,30 @@
           <input
             type="date"
             value={syncStartDate}
-            oninput={(event) => onSyncStartDateInput((event.currentTarget as HTMLInputElement).value)}
+            oninput={handleSyncStartDateEvent}
+            onchange={handleSyncStartDateEvent}
           />
         </label>
+        {#if !syncStartDate}
+          <p class="field-note">Choose a start date to enable backfill.</p>
+        {/if}
         <button
           class="button button-ghost"
           type="button"
           onclick={onSyncOuraFromDate}
-          disabled={loading || saving || ouraBusy || !ouraStatus?.connected}
+          disabled={loading || saving || ouraBusy || statusLoading || !ouraStatus?.connected || !syncStartDate}
         >
-          {ouraBusy ? "Running..." : "Backfill from date"}
+          {#if ouraBusy}
+            Running...
+          {:else if statusLoading}
+            Checking connection...
+          {:else if !ouraStatus?.connected}
+            Connect Oura first
+          {:else if !syncStartDate}
+            Choose a start date
+          {:else}
+            Backfill from date
+          {/if}
         </button>
       </article>
     </div>
@@ -193,7 +242,7 @@
       </div>
     {/if}
 
-    {#if ouraStatus?.last_error}
+    {#if ouraStatus?.last_error?.message}
       <p class="status-copy error">
         {entityLabel(ouraStatus.last_error.entity_kind)} failed
         {#if ouraStatus.last_error.chunk_start_date}
@@ -351,11 +400,27 @@
                   class="button button-primary"
                   type="button"
                   onclick={onSyncOura}
-                  disabled={loading || saving || ouraBusy || !ouraStatus?.connected}
+                  disabled={loading || saving || ouraBusy || statusLoading || !ouraStatus?.connected}
                 >
-                  {ouraBusy ? "Working..." : "Update now"}
+                  {#if ouraBusy}
+                    Working...
+                  {:else if statusLoading}
+                    Checking connection...
+                  {:else}
+                    Update now
+                  {/if}
                 </button>
               </div>
+
+              {#if statusLoading}
+                <p class="status-copy">Checking stored Oura connection...</p>
+              {:else if statusError}
+                <p class="status-copy warning">Connection status is currently unavailable. Use Refresh status to re-check the local app.</p>
+              {:else if !provider.configured}
+                <p class="status-copy warning">Save your local Oura client ID and secret before connecting.</p>
+              {:else if !ouraStatus?.connected}
+                <p class="status-copy warning">Credentials are saved locally. Use Connect Oura to finish authentication.</p>
+              {/if}
             {/if}
           </article>
         {/each}
@@ -680,6 +745,12 @@
     color: var(--accent);
   }
 
+  .field-note {
+    margin: -4px 0 0;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+
   input {
     width: 100%;
     border-radius: 14px;
@@ -696,6 +767,10 @@
 
   .status-copy.error {
     color: #913f30;
+  }
+
+  .status-copy.warning {
+    color: #8a5a16;
   }
 
   .status-copy.success {
