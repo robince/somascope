@@ -501,6 +501,157 @@ func TestOuraRecentReturnsDailyRecordsAndSleepSessions(t *testing.T) {
 	}
 }
 
+func TestDashboardOverview(t *testing.T) {
+	srv := newTestServer(t)
+
+	if err := srv.store.UpsertDailyRecord(context.Background(), store.DailyRecord{
+		Provider:     "oura",
+		RecordKind:   "daily_activity",
+		LocalDate:    "2026-03-20",
+		ZoneOffset:   "+01:00",
+		SourceDevice: "oura-ring-4",
+		ExternalID:   "activity-1",
+		Summary: json.RawMessage(`{
+			"score": 69,
+			"steps": 6480,
+			"active_calories": 394,
+			"total_calories": 2755,
+			"equivalent_walking_distance": 6497,
+			"high_activity_time": 0,
+			"medium_activity_time": 1980,
+			"low_activity_time": 16260,
+			"resting_time": 21060,
+			"non_wear_time": 240
+		}`),
+	}); err != nil {
+		t.Fatalf("seed activity record: %v", err)
+	}
+
+	if err := srv.store.UpsertDailyRecord(context.Background(), store.DailyRecord{
+		Provider:     "oura",
+		RecordKind:   "daily_readiness",
+		LocalDate:    "2026-03-20",
+		ZoneOffset:   "+01:00",
+		SourceDevice: "oura-ring-4",
+		ExternalID:   "readiness-1",
+		Summary:      json.RawMessage(`{"score":70,"temperature_deviation":0.17}`),
+	}); err != nil {
+		t.Fatalf("seed readiness record: %v", err)
+	}
+
+	duration := 438
+	timeInBed := 462
+	efficiency := 94.8
+	if err := srv.store.InsertSleepSession(context.Background(), store.SleepSession{
+		Provider:          "oura",
+		LocalDate:         "2026-03-20",
+		ZoneOffset:        "+01:00",
+		ExternalID:        "sleep-1",
+		StartTime:         "2026-03-19T22:58:00+01:00",
+		EndTime:           "2026-03-20T06:16:00+01:00",
+		DurationMinutes:   &duration,
+		TimeInBedMinutes:  &timeInBed,
+		EfficiencyPercent: &efficiency,
+		Stages: json.RawMessage(`{
+			"awake_time": 1920,
+			"deep_sleep_duration": 4590,
+			"light_sleep_duration": 9810,
+			"rem_sleep_duration": 5640
+		}`),
+		Metrics: json.RawMessage(`{
+			"average_heart_rate": 65.25,
+			"average_hrv": 34,
+			"type": "long_sleep"
+		}`),
+	}); err != nil {
+		t.Fatalf("seed sleep session: %v", err)
+	}
+
+	napDuration := 20
+	napInBed := 28
+	napEfficiency := 71.0
+	if err := srv.store.InsertSleepSession(context.Background(), store.SleepSession{
+		Provider:          "oura",
+		LocalDate:         "2026-03-20",
+		ZoneOffset:        "+01:00",
+		ExternalID:        "sleep-2",
+		StartTime:         "2026-03-20T15:04:00+01:00",
+		EndTime:           "2026-03-20T15:32:00+01:00",
+		DurationMinutes:   &napDuration,
+		TimeInBedMinutes:  &napInBed,
+		EfficiencyPercent: &napEfficiency,
+		IsNap:             true,
+	}); err != nil {
+		t.Fatalf("seed nap session: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/overview", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		AvailableDays int      `json:"available_days"`
+		Providers     []string `json:"providers"`
+		Daily         []struct {
+			Date     string `json:"date"`
+			Activity struct {
+				Score                 int `json:"score"`
+				Steps                 int `json:"steps"`
+				MediumActivityMinutes int `json:"medium_activity_minutes"`
+				LowActivityMinutes    int `json:"low_activity_minutes"`
+				RestingMinutes        int `json:"resting_minutes"`
+			} `json:"activity"`
+			Readiness struct {
+				Score int `json:"score"`
+			} `json:"readiness"`
+			Sleep struct {
+				DurationMinutes  int     `json:"duration_minutes"`
+				AverageHeartRate float64 `json:"average_heart_rate"`
+				DeepMinutes      int     `json:"deep_minutes"`
+				NapsCount        int     `json:"naps_count"`
+				NapMinutes       int     `json:"nap_minutes"`
+				SleepType        string  `json:"sleep_type"`
+			} `json:"sleep"`
+		} `json:"daily"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal dashboard overview: %v", err)
+	}
+
+	if payload.AvailableDays != 1 {
+		t.Fatalf("expected 1 available day, got %d", payload.AvailableDays)
+	}
+	if len(payload.Providers) != 1 || payload.Providers[0] != "oura" {
+		t.Fatalf("unexpected providers: %+v", payload.Providers)
+	}
+	if len(payload.Daily) != 1 {
+		t.Fatalf("expected 1 daily item, got %d", len(payload.Daily))
+	}
+	if payload.Daily[0].Activity.Score != 69 || payload.Daily[0].Activity.Steps != 6480 {
+		t.Fatalf("unexpected activity summary: %+v", payload.Daily[0].Activity)
+	}
+	if payload.Daily[0].Activity.MediumActivityMinutes != 33 ||
+		payload.Daily[0].Activity.LowActivityMinutes != 271 ||
+		payload.Daily[0].Activity.RestingMinutes != 351 {
+		t.Fatalf("unexpected activity minute conversions: %+v", payload.Daily[0].Activity)
+	}
+	if payload.Daily[0].Readiness.Score != 70 {
+		t.Fatalf("unexpected readiness summary: %+v", payload.Daily[0].Readiness)
+	}
+	if payload.Daily[0].Sleep.DurationMinutes != 438 ||
+		payload.Daily[0].Sleep.AverageHeartRate != 65.25 ||
+		payload.Daily[0].Sleep.DeepMinutes != 76 ||
+		payload.Daily[0].Sleep.NapsCount != 1 ||
+		payload.Daily[0].Sleep.NapMinutes != 20 ||
+		payload.Daily[0].Sleep.SleepType != "long_sleep" {
+		t.Fatalf("unexpected sleep summary: %+v", payload.Daily[0].Sleep)
+	}
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
