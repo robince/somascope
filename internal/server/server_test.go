@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -173,6 +174,99 @@ func TestCanonicalExportJSONL(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"record_type":"daily_record"`) {
 		t.Fatalf("expected jsonl body to include daily record row, got %s", rec.Body.String())
+	}
+}
+
+func TestCanonicalExportCSVExcludesRawDocuments(t *testing.T) {
+	srv := newTestServer(t)
+
+	if _, err := srv.store.UpsertRawDocument(context.Background(), store.RawDocument{
+		Provider:     "oura",
+		DocumentKind: "daily_activity",
+		ExternalID:   "raw-1",
+		LocalDate:    "2026-03-20",
+		Payload:      json.RawMessage(`{"id":"raw-1","steps":12345}`),
+		FetchedAt:    "2026-03-20T08:00:00Z",
+		DocumentKey:  "daily_activity:raw-1",
+	}); err != nil {
+		t.Fatalf("seed raw document: %v", err)
+	}
+
+	if err := srv.store.UpsertDailyRecord(context.Background(), store.DailyRecord{
+		Provider:     "oura",
+		RecordKind:   "daily_activity",
+		LocalDate:    "2026-03-20",
+		ZoneOffset:   "+01:00",
+		SourceDevice: "oura-ring-4",
+		ExternalID:   "activity-1",
+		Summary:      json.RawMessage(`{"steps":12345}`),
+	}); err != nil {
+		t.Fatalf("seed daily record: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/export/canonical?format=csv", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	reader := csv.NewReader(strings.NewReader(rec.Body.String()))
+	rows, err := reader.ReadAll()
+	if err != nil {
+		t.Fatalf("read csv: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected header plus 1 canonical row, got %d rows", len(rows))
+	}
+	if rows[1][0] != "daily_record" {
+		t.Fatalf("expected canonical row type daily_record, got %q", rows[1][0])
+	}
+}
+
+func TestRawExportJSONLFiltersByProvider(t *testing.T) {
+	srv := newTestServer(t)
+
+	if _, err := srv.store.UpsertRawDocument(context.Background(), store.RawDocument{
+		Provider:     "oura",
+		DocumentKind: "daily_activity",
+		ExternalID:   "activity-1",
+		LocalDate:    "2026-03-20",
+		Payload:      json.RawMessage(`{"id":"activity-1","steps":12345}`),
+		FetchedAt:    "2026-03-20T08:00:00Z",
+		DocumentKey:  "daily_activity:activity-1",
+	}); err != nil {
+		t.Fatalf("seed oura raw document: %v", err)
+	}
+
+	if _, err := srv.store.UpsertRawDocument(context.Background(), store.RawDocument{
+		Provider:     "fitbit",
+		DocumentKind: "sleep",
+		ExternalID:   "sleep-1",
+		LocalDate:    "2026-03-20",
+		Payload:      json.RawMessage(`{"logId":"sleep-1"}`),
+		FetchedAt:    "2026-03-20T09:00:00Z",
+		DocumentKey:  "sleep:sleep-1",
+	}); err != nil {
+		t.Fatalf("seed fitbit raw document: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/export/raw?provider=oura&format=jsonl", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"record_type":"raw_document"`) {
+		t.Fatalf("expected raw export to include raw_document record type, got %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"provider":"oura"`) {
+		t.Fatalf("expected raw export to include Oura row, got %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"provider":"fitbit"`) {
+		t.Fatalf("expected raw export to exclude Fitbit row, got %s", rec.Body.String())
 	}
 }
 
@@ -733,7 +827,12 @@ func TestDashboardOverview(t *testing.T) {
 	var payload struct {
 		AvailableDays int      `json:"available_days"`
 		Providers     []string `json:"providers"`
-		Daily         []struct {
+		ExportURLs    struct {
+			CanonicalCSV       string            `json:"canonical_csv"`
+			CanonicalJSONL     string            `json:"canonical_jsonl"`
+			RawJSONLByProvider map[string]string `json:"raw_jsonl_by_provider"`
+		} `json:"export_urls"`
+		Daily []struct {
 			Date     string `json:"date"`
 			Activity struct {
 				Score                 int `json:"score"`
@@ -764,6 +863,12 @@ func TestDashboardOverview(t *testing.T) {
 	}
 	if len(payload.Providers) != 1 || payload.Providers[0] != "oura" {
 		t.Fatalf("unexpected providers: %+v", payload.Providers)
+	}
+	if payload.ExportURLs.CanonicalCSV != "/api/v1/export/canonical?format=csv" {
+		t.Fatalf("unexpected canonical csv url: %q", payload.ExportURLs.CanonicalCSV)
+	}
+	if payload.ExportURLs.RawJSONLByProvider["oura"] != "/api/v1/export/raw?provider=oura&format=jsonl" {
+		t.Fatalf("unexpected raw oura export url: %+v", payload.ExportURLs.RawJSONLByProvider)
 	}
 	if len(payload.Daily) != 1 {
 		t.Fatalf("expected 1 daily item, got %d", len(payload.Daily))

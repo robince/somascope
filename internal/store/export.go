@@ -54,6 +54,19 @@ type CanonicalExportRow struct {
 	RawDocumentID     *int64          `json:"raw_document_id,omitempty"`
 }
 
+type RawExportRow struct {
+	RecordType    string          `json:"record_type"`
+	Provider      string          `json:"provider"`
+	DocumentKind  string          `json:"document_kind"`
+	ExternalID    string          `json:"external_id,omitempty"`
+	LocalDate     string          `json:"local_date,omitempty"`
+	ZoneOffset    string          `json:"zone_offset,omitempty"`
+	FetchedAt     string          `json:"fetched_at"`
+	DocumentKey   string          `json:"document_key,omitempty"`
+	RawDocumentID int64           `json:"raw_document_id"`
+	Payload       json.RawMessage `json:"payload"`
+}
+
 func (s *Store) UpsertDailyRecord(ctx context.Context, record DailyRecord) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO daily_records (
@@ -206,6 +219,55 @@ func (s *Store) CanonicalExportRows(ctx context.Context) ([]CanonicalExportRow, 
 			row.RawDocumentID = &value
 		}
 
+		out = append(out, row)
+	}
+
+	return out, rows.Err()
+}
+
+func (s *Store) RawExportRows(ctx context.Context, provider string) ([]RawExportRow, error) {
+	const query = `
+		SELECT
+			'raw_document' AS record_type,
+			provider,
+			document_kind,
+			COALESCE(external_id, ''),
+			COALESCE(local_date, ''),
+			COALESCE(zone_offset, ''),
+			fetched_at,
+			document_key,
+			id,
+			payload_json
+		FROM raw_documents
+		WHERE provider = ?
+		ORDER BY COALESCE(local_date, '') DESC, fetched_at DESC, id DESC;
+	`
+
+	rows, err := s.db.QueryContext(ctx, query, provider)
+	if err != nil {
+		return nil, fmt.Errorf("query raw export rows: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RawExportRow
+	for rows.Next() {
+		var row RawExportRow
+		var payload string
+		if err := rows.Scan(
+			&row.RecordType,
+			&row.Provider,
+			&row.DocumentKind,
+			&row.ExternalID,
+			&row.LocalDate,
+			&row.ZoneOffset,
+			&row.FetchedAt,
+			&row.DocumentKey,
+			&row.RawDocumentID,
+			&payload,
+		); err != nil {
+			return nil, fmt.Errorf("scan raw export row: %w", err)
+		}
+		row.Payload = json.RawMessage(payload)
 		out = append(out, row)
 	}
 

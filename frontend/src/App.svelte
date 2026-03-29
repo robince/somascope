@@ -550,7 +550,7 @@
   <header class="topbar">
     <div class="brand">
       <p class="brand-mark">SOMASCOPE</p>
-      <span>{dashboard?.providers.length ? `${dashboard.providers.join(", ")} synced` : "Local-first wearable dashboard"}</span>
+      <span>Local-first wearable dashboard</span>
     </div>
 
     <nav class="view-switch" aria-label="Primary views">
@@ -562,7 +562,6 @@
   <section hidden={activeView !== "dashboard"} aria-hidden={activeView !== "dashboard"}>
     <DashboardView
       {dashboard}
-      {formats}
       {activePeriod}
       {windowEndDate}
       loading={dashboardLoading}

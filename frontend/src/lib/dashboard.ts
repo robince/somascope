@@ -14,6 +14,19 @@ export const SLEEP_AXIS_LABELS = [
 const NIGHT_AXIS_START_MINUTES = 18 * 60;
 const NIGHT_AXIS_SPAN_MINUTES = 18 * 60;
 
+export type ChartResolution = "daily" | "weekly";
+
+export type DashboardBucket = {
+  start_date: string;
+  end_date: string;
+  label_date: string;
+  activity_steps: number | null;
+  readiness_score: number | null;
+  sleep_start_minutes: number | null;
+  sleep_end_minutes: number | null;
+  sleep_duration_minutes: number | null;
+};
+
 export function fillWindow(daily: DashboardDay[], startDate: string, endDate: string): DashboardDay[] {
   const daysByDate = new Map(daily.map((day) => [day.date, day]));
   return buildDateRange(startDate, endDate).map((date) => daysByDate.get(date) ?? { date });
@@ -38,80 +51,52 @@ export function movingAverage(values: Array<number | null | undefined>, windowSi
   });
 }
 
-export function buildSparkPath(
-  values: Array<number | null | undefined>,
-  width: number,
-  height: number,
-  minValue: number,
-  maxValue: number
-): string {
-  if (values.length === 0) {
-    return "";
-  }
+export function centeredMovingAverage(values: Array<number | null | undefined>, windowSize: number): Array<number | null> {
+  const before = Math.floor((windowSize - 1) / 2);
+  const after = Math.ceil((windowSize - 1) / 2);
 
-  const span = Math.max(maxValue - minValue, 1);
-  const points = values
-    .map((value, index) => {
-      if (value == null) {
-        return null;
-      }
-      const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width;
-      const normalized = Math.min(Math.max((value - minValue) / span, 0), 1);
-      const y = height - normalized * height;
-      return { x, y };
-    });
-
-  let path = "";
-  for (const point of points) {
-    if (!point) {
-      continue;
+  return values.map((_, index) => {
+    const start = index - before;
+    const end = index + after;
+    if (start < 0 || end >= values.length) {
+      return null;
     }
-    path += path ? ` L ${point.x} ${point.y}` : `M ${point.x} ${point.y}`;
-  }
-  return path;
+
+    return averageDefined(values.slice(start, end + 1));
+  });
 }
 
-export function activitySegments(day: DashboardDay) {
-  const activity = day.activity;
-  const raw = [
-    {
-      label: "High",
-      className: "high",
-      minutes: activity?.high_activity_minutes ?? 0
-    },
-    {
-      label: "Medium",
-      className: "medium",
-      minutes: activity?.medium_activity_minutes ?? 0
-    },
-    {
-      label: "Low",
-      className: "low",
-      minutes: activity?.low_activity_minutes ?? 0
-    },
-    {
-      label: "Rest",
-      className: "rest",
-      minutes: activity?.resting_minutes ?? 0
-    },
-    {
-      label: "Off-body",
-      className: "off",
-      minutes: activity?.non_wear_minutes ?? 0
-    }
-  ];
+export function chartResolutionForDays(dayCount: number): ChartResolution {
+  return dayCount > 180 ? "weekly" : "daily";
+}
 
-  const total = raw.reduce((sum, item) => sum + item.minutes, 0);
-  if (total === 0) {
-    return [];
+export function buildDashboardBuckets(days: DashboardDay[], resolution: ChartResolution): DashboardBucket[] {
+  const bucketSize = resolution === "weekly" ? 7 : 1;
+  const buckets: DashboardBucket[] = [];
+
+  for (let start = 0; start < days.length; start += bucketSize) {
+    const slice = days.slice(start, start + bucketSize);
+    if (!slice.length) {
+      continue;
+    }
+
+    const sleepRanges = slice
+      .map((day) => sleepRangeMinutes(day.sleep))
+      .filter((range): range is { start: number; end: number } => range != null);
+
+    buckets.push({
+      start_date: slice[0].date,
+      end_date: slice[slice.length - 1].date,
+      label_date: slice[slice.length - 1].date,
+      activity_steps: averageDefined(slice.map((day) => day.activity?.steps)),
+      readiness_score: averageDefined(slice.map((day) => day.readiness?.score)),
+      sleep_start_minutes: medianDefined(sleepRanges.map((range) => range.start)),
+      sleep_end_minutes: medianDefined(sleepRanges.map((range) => range.end)),
+      sleep_duration_minutes: averageDefined(slice.map((day) => day.sleep?.duration_minutes))
+    });
   }
 
-  return raw
-    .filter((item) => item.minutes > 0)
-    .map((item) => ({
-      ...item,
-      percent: (item.minutes / total) * 100
-    }));
+  return buckets;
 }
 
 export function minutesToHoursLabel(value?: number): string {
@@ -124,23 +109,7 @@ export function minutesToHoursLabel(value?: number): string {
   return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }
 
-export function clockTimeLabel(value?: string): string {
-  if (!value) {
-    return "--";
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "--";
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit"
-  }).format(date);
-}
-
-export function sleepPosition(sleep?: DashboardSleep): { top: number; height: number } | null {
+export function sleepRangeMinutes(sleep?: DashboardSleep): { start: number; end: number } | null {
   if (!sleep?.start_time || !sleep.end_time) {
     return null;
   }
@@ -151,22 +120,10 @@ export function sleepPosition(sleep?: DashboardSleep): { top: number; height: nu
     return null;
   }
 
-  const safeEnd = Math.max(end, start + 10);
-  const top = clampPercent((start / NIGHT_AXIS_SPAN_MINUTES) * 100);
-  const height = clampPercent(((safeEnd - start) / NIGHT_AXIS_SPAN_MINUTES) * 100);
-
   return {
-    top,
-    height: Math.max(height, 2.5)
+    start,
+    end
   };
-}
-
-export function sleepOpacity(sleep?: DashboardSleep): number {
-  const efficiency = sleep?.efficiency_percent;
-  if (typeof efficiency !== "number") {
-    return 0.45;
-  }
-  return Math.min(Math.max((efficiency - 50) / 45, 0.35), 1);
 }
 
 function wrapNightMinutes(value: string): number | null {
@@ -182,6 +139,19 @@ function wrapNightMinutes(value: string): number | null {
   return Math.min(Math.max(minutes - NIGHT_AXIS_START_MINUTES, 0), NIGHT_AXIS_SPAN_MINUTES);
 }
 
-function clampPercent(value: number): number {
-  return Math.min(Math.max(value, 0), 100);
+function medianDefined(values: Array<number | null | undefined>): number | null {
+  const filtered = values
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .sort((left, right) => left - right);
+
+  if (!filtered.length) {
+    return null;
+  }
+
+  const middle = Math.floor(filtered.length / 2);
+  if (filtered.length % 2 === 1) {
+    return filtered[middle];
+  }
+
+  return (filtered[middle - 1] + filtered[middle]) / 2;
 }

@@ -20,8 +20,9 @@ type dashboardOverview struct {
 }
 
 type dashboardOverviewExport struct {
-	CanonicalJSONL string `json:"canonical_jsonl"`
-	CanonicalCSV   string `json:"canonical_csv"`
+	CanonicalJSONL     string            `json:"canonical_jsonl"`
+	CanonicalCSV       string            `json:"canonical_csv"`
+	RawJSONLByProvider map[string]string `json:"raw_jsonl_by_provider,omitempty"`
 }
 
 type dashboardOverviewDay struct {
@@ -159,6 +160,9 @@ func (s *Server) buildDashboardOverview(ctx context.Context) (dashboardOverview,
 		ExportURLs: dashboardOverviewExport{
 			CanonicalJSONL: "/api/v1/export/canonical?format=jsonl",
 			CanonicalCSV:   "/api/v1/export/canonical?format=csv",
+			RawJSONLByProvider: map[string]string{
+				"oura": "/api/v1/export/raw?provider=oura&format=jsonl",
+			},
 		},
 		Daily: daily,
 	}, nil

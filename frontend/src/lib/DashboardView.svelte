@@ -1,19 +1,18 @@
 <script lang="ts">
+  import { buildChartTimeAxis } from "./chartTime";
   import {
     SLEEP_AXIS_LABELS,
-    activitySegments,
     averageDefined,
-    clockTimeLabel,
+    buildDashboardBuckets,
+    chartResolutionForDays,
+    centeredMovingAverage,
     fillWindow,
-    minutesToHoursLabel,
-    sleepOpacity,
-    sleepPosition
+    minutesToHoursLabel
   } from "./dashboard";
-  import { PERIODS, formatMonthDayCompact, formatRangeLabel, formatWeekday, getPeriod, getWindowStart } from "./time";
-  import type { DashboardOverview, ExportFormat, OuraStatus, PeriodId } from "./types";
+  import { PERIODS, formatRangeLabel, getPeriod, getWindowStart } from "./time";
+  import type { DashboardOverview, OuraStatus, PeriodId } from "./types";
 
   export let dashboard: DashboardOverview | null = null;
-  export let formats: ExportFormat[] = [];
   export let activePeriod: PeriodId = "1m";
   export let windowEndDate = "";
   export let loading = false;
@@ -25,103 +24,231 @@
   export let onOpenSettings: (anchor?: string) => void = () => {};
   export let onSyncIncremental: () => void = () => {};
 
-  const READINESS_CHART_WIDTH = 720;
-  const READINESS_CHART_HEIGHT = 220;
-  const READINESS_CHART_PAD_LEFT = 42;
-  const READINESS_CHART_PAD_RIGHT = 12;
-  const READINESS_CHART_PAD_TOP = 16;
-  const READINESS_CHART_PAD_BOTTOM = 28;
+  const CHART_WIDTH = 720;
+  const CHART_HEIGHT = 220;
+  const CHART_PAD_LEFT = 42;
+  const CHART_PAD_RIGHT = 12;
+  const CHART_PAD_TOP = 16;
+  const CHART_PAD_BOTTOM = 28;
+  const SLEEP_CHART_HEIGHT = 240;
   const READINESS_MIN = 40;
   const READINESS_MAX = 100;
   const READINESS_TICKS = [100, 85, 70, 55, 40];
+  const SLEEP_AXIS_MAX_MINUTES = 18 * 60;
+  type SeriesPoint = { key: string; x: number; y: number };
 
   $: period = getPeriod(activePeriod);
   $: resolvedEndDate = windowEndDate || dashboard?.latest_date || "";
   $: windowStartDate = resolvedEndDate ? getWindowStart(resolvedEndDate, period.days) : "";
   $: visibleDays = dashboard && windowStartDate ? fillWindow(dashboard.daily, windowStartDate, resolvedEndDate) : [];
   $: rangeLabel = visibleDays.length ? formatRangeLabel(visibleDays[0].date, visibleDays[visibleDays.length - 1].date) : "No visible range";
-  $: chartMode = visibleDays.length > 180 ? "micro" : visibleDays.length > 42 ? "dense" : "regular";
-  $: chartGap = chartMode === "micro" ? 2 : chartMode === "dense" ? 4 : 8;
-  $: readinessPoints = visibleDays.map((day, index) => {
-    const score = day.readiness?.score;
-    return score == null
-      ? null
-      : {
-          date: day.date,
-          score,
-          x: readinessX(index, visibleDays.length),
-          y: readinessY(score)
-        };
-  });
-  $: readinessPath = buildReadinessPath(readinessPoints);
-  $: readinessDotCount = readinessPoints.filter(Boolean).length;
-  $: latestDay = [...visibleDays].reverse().find((day) => day.activity || day.readiness || day.sleep) ?? null;
+  $: chartResolution = chartResolutionForDays(visibleDays.length);
+  $: buckets = buildDashboardBuckets(visibleDays, chartResolution);
+  $: chartTimeAxis =
+    visibleDays.length && resolvedEndDate
+      ? buildChartTimeAxis({
+          startDate: visibleDays[0].date,
+          endDate: visibleDays[visibleDays.length - 1].date,
+          periodId: activePeriod,
+          width: CHART_WIDTH,
+          padLeft: CHART_PAD_LEFT,
+          padRight: CHART_PAD_RIGHT
+        })
+      : null;
+  $: xTicks = chartTimeAxis?.ticks ?? [];
+  $: activityValues = buckets.map((bucket) => bucket.activity_steps);
+  $: readinessValues = buckets.map((bucket) => bucket.readiness_score);
+  $: sleepStartValues = buckets.map((bucket) => bucket.sleep_start_minutes);
+  $: sleepEndValues = buckets.map((bucket) => bucket.sleep_end_minutes);
+  $: weekendBands =
+    chartResolution === "daily" && chartTimeAxis
+      ? buildWeekendBands(visibleDays, chartTimeAxis)
+      : [];
+  $: smoothingWindow = getSmoothingWindow(activePeriod);
+  $: smoothingOffset = smoothingWindow % 2 === 0 ? 0.5 : 0;
+  $: activitySmoothed = centeredMovingAverage(activityValues, smoothingWindow);
+  $: readinessSmoothed = centeredMovingAverage(readinessValues, smoothingWindow);
+  $: activityMax = niceUpperBound(activityValues, 1000);
+  $: activityTicks = buildLinearTicks(activityMax, 4);
+  $: activityRawPoints = buildSeriesPoints(activityValues, buckets, chartTimeAxis, activityY, CHART_HEIGHT);
+  $: activitySmoothPoints = buildSeriesPoints(activitySmoothed, buckets, chartTimeAxis, activityY, CHART_HEIGHT, smoothingOffset);
+  $: activityPath = buildPathFromPoints(activityRawPoints);
+  $: activitySmoothPath = buildPathFromPoints(activitySmoothPoints);
+  $: activityDotCount = activityRawPoints.length;
+  $: readinessRawPoints = buildSeriesPoints(readinessValues, buckets, chartTimeAxis, readinessY, CHART_HEIGHT);
+  $: readinessSmoothPoints = buildSeriesPoints(readinessSmoothed, buckets, chartTimeAxis, readinessY, CHART_HEIGHT, smoothingOffset);
+  $: readinessPath = buildPathFromPoints(readinessRawPoints);
+  $: readinessSmoothPath = buildPathFromPoints(readinessSmoothPoints);
+  $: readinessDotCount = readinessRawPoints.length;
+  $: sleepStartPoints = buildSeriesPoints(sleepStartValues, buckets, chartTimeAxis, sleepY, SLEEP_CHART_HEIGHT);
+  $: sleepEndPoints = buildSeriesPoints(sleepEndValues, buckets, chartTimeAxis, sleepY, SLEEP_CHART_HEIGHT);
+  $: sleepBandPath = buildBandPathFromPoints(sleepStartPoints, sleepEndPoints);
+  $: sleepStartPath = buildPathFromPoints(sleepStartPoints);
+  $: sleepEndPath = buildPathFromPoints(sleepEndPoints);
+  $: sleepDotCount = sleepStartPoints.length;
   $: averageReadiness = averageDefined(visibleDays.map((day) => day.readiness?.score));
   $: averageSleep = averageDefined(visibleDays.map((day) => day.sleep?.duration_minutes));
   $: averageDailySteps = averageDefined(visibleDays.map((day) => day.activity?.steps));
-  $: plannedFormats = formats.filter((format) => format.id === "raw-json");
+  $: rawOuraExportURL = dashboard?.export_urls.raw_jsonl_by_provider?.oura ?? "";
 
-  function scoreTone(score?: number): string {
-    if (score == null) {
-      return "muted";
-    }
-    if (score >= 85) {
-      return "excellent";
-    }
-    if (score >= 72) {
-      return "steady";
-    }
-    if (score >= 60) {
-      return "watch";
-    }
-    return "low";
+  function bucketCenterX(index: number, offsetUnits = 0): number {
+    const bucket = buckets[index];
+    return scaledBucketCenterX(bucket, chartTimeAxis, offsetUnits);
   }
 
-  function showTick(index: number, total: number): boolean {
-    if (total <= 14) {
-      return true;
+  function scaledBucketCenterX(
+    bucket: (typeof buckets)[number] | undefined,
+    timeAxis: typeof chartTimeAxis,
+    offsetUnits = 0
+  ): number {
+    if (!bucket || !timeAxis) {
+      return CHART_PAD_LEFT;
     }
-    if (total <= 31) {
-      return index % 5 === 0 || index === total - 1;
-    }
-    if (total <= 90) {
-      return index % 14 === 0 || index === total - 1;
-    }
-    if (total <= 180) {
-      return index % 30 === 0 || index === total - 1;
-    }
-    return index % 60 === 0 || index === total - 1;
+
+    return timeAxis.xForRangeCenter(bucket.start_date, bucket.end_date, offsetUnits);
   }
 
-  function readinessX(index: number, total: number): number {
-    const plotWidth = READINESS_CHART_WIDTH - READINESS_CHART_PAD_LEFT - READINESS_CHART_PAD_RIGHT;
-    if (total <= 1) {
-      return READINESS_CHART_PAD_LEFT + plotWidth / 2;
-    }
-    return READINESS_CHART_PAD_LEFT + (index / (total - 1)) * plotWidth;
+  function activityY(value: number): number {
+    const plotHeight = CHART_HEIGHT - CHART_PAD_TOP - CHART_PAD_BOTTOM;
+    const normalized = Math.min(Math.max(value / activityMax, 0), 1);
+    return CHART_HEIGHT - CHART_PAD_BOTTOM - normalized * plotHeight;
   }
 
   function readinessY(score: number): number {
-    const plotHeight = READINESS_CHART_HEIGHT - READINESS_CHART_PAD_TOP - READINESS_CHART_PAD_BOTTOM;
+    const plotHeight = CHART_HEIGHT - CHART_PAD_TOP - CHART_PAD_BOTTOM;
     const normalized = Math.min(Math.max((score - READINESS_MIN) / (READINESS_MAX - READINESS_MIN), 0), 1);
-    return READINESS_CHART_HEIGHT - READINESS_CHART_PAD_BOTTOM - normalized * plotHeight;
+    return CHART_HEIGHT - CHART_PAD_BOTTOM - normalized * plotHeight;
   }
 
-  function buildReadinessPath(points: Array<{ x: number; y: number } | null>): string {
-    let path = "";
-    let activeSegment = false;
+  function sleepY(minutes: number): number {
+    const plotHeight = SLEEP_CHART_HEIGHT - CHART_PAD_TOP - CHART_PAD_BOTTOM;
+    const normalized = Math.min(Math.max(minutes / SLEEP_AXIS_MAX_MINUTES, 0), 1);
+    return CHART_PAD_TOP + normalized * plotHeight;
+  }
 
-    for (const point of points) {
-      if (!point) {
-        activeSegment = false;
+  function buildSeriesPoints(
+    values: Array<number | null | undefined>,
+    seriesBuckets: typeof buckets,
+    timeAxis: typeof chartTimeAxis,
+    yForValue: (value: number) => number,
+    chartHeight: number,
+    xOffset = 0
+  ): SeriesPoint[] {
+    if (!timeAxis) {
+      return [];
+    }
+
+    const points: SeriesPoint[] = [];
+
+    for (const [index, value] of values.entries()) {
+      if (value == null) {
         continue;
       }
 
-      path += activeSegment ? ` L ${point.x} ${point.y}` : `M ${point.x} ${point.y}`;
-      activeSegment = true;
+      const bucket = seriesBuckets[index];
+      if (!bucket) {
+        continue;
+      }
+
+      points.push({
+        key: bucket.start_date,
+        x: scaledBucketCenterX(bucket, timeAxis, xOffset),
+        y: clamp(yForValue(value), CHART_PAD_TOP, chartHeight - CHART_PAD_BOTTOM)
+      });
     }
 
+    return points;
+  }
+
+  function buildWeekendBands(
+    days: typeof visibleDays,
+    timeAxis: NonNullable<typeof chartTimeAxis>
+  ): Array<{ x: number; width: number }> {
+    return days.flatMap((day) => {
+      if (!isWeekend(day.date)) {
+        return [];
+      }
+
+      const { x, width } = timeAxis.bandForRange(day.date, day.date);
+      return [{ x, width }];
+    });
+  }
+
+  function buildPathFromPoints(points: SeriesPoint[]): string {
+    let path = "";
+    for (const [index, point] of points.entries()) {
+      path += index === 0 ? `M ${point.x} ${point.y}` : ` L ${point.x} ${point.y}`;
+    }
     return path;
+  }
+
+  function buildBandPathFromPoints(startPoints: SeriesPoint[], endPoints: SeriesPoint[]): string {
+    if (!startPoints.length || !endPoints.length) {
+      return "";
+    }
+
+    let path = `M ${startPoints[0].x} ${startPoints[0].y}`;
+    for (const point of startPoints.slice(1)) {
+      path += ` L ${point.x} ${point.y}`;
+    }
+    for (const point of [...endPoints].reverse()) {
+      path += ` L ${point.x} ${point.y}`;
+    }
+    path += " Z";
+    return path;
+  }
+
+  function buildLinearTicks(maxValue: number, segments: number): number[] {
+    return Array.from({ length: segments + 1 }, (_, index) => Math.round((maxValue / segments) * index));
+  }
+
+  function niceUpperBound(values: Array<number | null | undefined>, minimum: number): number {
+    const defined = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    if (!defined.length) {
+      return minimum;
+    }
+
+    const maxValue = Math.max(...defined, minimum);
+    const magnitude = 10 ** Math.floor(Math.log10(maxValue));
+    const normalized = maxValue / magnitude;
+
+    if (normalized <= 1) {
+      return magnitude;
+    }
+    if (normalized <= 2) {
+      return 2 * magnitude;
+    }
+    if (normalized <= 5) {
+      return 5 * magnitude;
+    }
+    return 10 * magnitude;
+  }
+
+  function rollingLabel(windowSize: number): string {
+    return `${windowSize}-${chartResolution === "weekly" ? "week" : "day"} average`;
+  }
+
+  function getSmoothingWindow(periodId: PeriodId): number {
+    if (periodId === "1w") {
+      return 2;
+    }
+    if (periodId === "1m") {
+      return 3;
+    }
+    if (periodId === "1y") {
+      return 2;
+    }
+    return 7;
+  }
+
+  function isWeekend(date: string): boolean {
+    const parsed = new Date(`${date}T12:00:00Z`);
+    const day = parsed.getUTCDay();
+    return day === 0 || day === 6;
+  }
+
+  function clamp(value: number, min: number, max: number): number {
+    return Math.min(Math.max(value, min), max);
   }
 </script>
 
@@ -141,10 +268,6 @@
         <button class="text-link" type="button" onclick={() => onOpenSettings()}>Open settings</button>
       </div>
     </div>
-    <h1>Daily body signals, local-first.</h1>
-    <p class="lede">
-      Keep the dashboard dense and readable: activity as the main daily block view, readiness as a simple line, and sleep as a shared nightly timeline.
-    </p>
 
     <div class="hero-stats">
       <article>
@@ -183,7 +306,7 @@
       </div>
     </div>
 
-    <p class="window-copy">{period.label} window · {rangeLabel}</p>
+    <p class="window-copy">{rangeLabel}</p>
   </section>
 
   {#if loading}
@@ -199,59 +322,99 @@
   {:else if !dashboard?.daily.length}
     <article class="panel empty-panel">
       <h2>No synced records yet.</h2>
-      <p>Once a provider sync lands, this page can fill the same period framework with activity blocks, readiness trends, and sleep strips.</p>
+      <p>Once a provider sync lands, this page can fill the same period framework with activity, readiness, and sleep timing trends.</p>
     </article>
   {:else}
     <section class="visual-grid">
       <article class="panel activity-panel">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Block View</p>
-            <h2>Daily activity blocks</h2>
+            <p class="eyebrow">Trend</p>
+            <h2>Steps trend</h2>
           </div>
         </div>
 
-        <div class="legend-row">
-          <span class="legend-item high">High</span>
-          <span class="legend-item medium">Medium</span>
-          <span class="legend-item low">Low</span>
-          <span class="legend-item rest">Rest</span>
-          <span class="legend-item off">Off-body</span>
+        <div class="trend-legend">
+          <span class="legend-line">
+            <span class="line-swatch line-swatch-raw"></span>
+            Per {chartResolution === "weekly" ? "week" : "day"}
+          </span>
+          <span class="legend-line">
+            <span class="line-swatch line-swatch-smooth"></span>
+            {rollingLabel(smoothingWindow)}
+          </span>
         </div>
 
-        <div class="block-frame">
-          <div class="activity-grid {chartMode}" style={`--day-count:${visibleDays.length}; --grid-gap:${chartGap}px;`}>
-            {#each visibleDays as day, index}
-              {@const segments = activitySegments(day)}
-              <article class:missing={!segments.length} class="activity-day">
-                <header class="day-head">
-                  <small>{showTick(index, visibleDays.length) ? formatWeekday(day.date) : ""}</small>
-                  <strong class={`score-pill ${scoreTone(day.activity?.score)}`}>{day.activity?.score ?? "--"}</strong>
-                </header>
-
-                <div class="segments">
-                  {#if segments.length}
-                    {#each segments as segment}
-                      <div
-                        class={`segment ${segment.className}`}
-                        style={`height:${segment.percent}%;`}
-                        title={`${segment.label}: ${segment.minutes} min`}
-                      ></div>
-                    {/each}
-                  {:else}
-                    <div class="segment-empty"></div>
-                  {/if}
-                </div>
-
-                <div class="day-meta">
-                  <span>{day.activity?.steps ? new Intl.NumberFormat().format(day.activity.steps) : "--"}</span>
-                  {#if showTick(index, visibleDays.length)}
-                    <small>{formatMonthDayCompact(day.date)}</small>
-                  {/if}
-                </div>
-              </article>
+        <div class="trend-wrap">
+          <div class="chart-stat-badge activity-stat-badge">
+            <span>Average steps</span>
+            <strong>{averageDailySteps ? new Intl.NumberFormat().format(Math.round(averageDailySteps)) : "--"}</strong>
+          </div>
+          <svg viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} aria-label="Steps trend">
+            {#each weekendBands as band}
+              <rect
+                x={band.x}
+                y={CHART_PAD_TOP}
+                width={band.width}
+                height={CHART_HEIGHT - CHART_PAD_TOP - CHART_PAD_BOTTOM}
+                class="weekend-band"
+              />
             {/each}
-          </div>
+            {#each activityTicks as tick}
+              {@const y = activityY(tick)}
+              <line
+                x1={CHART_PAD_LEFT}
+                y1={y}
+                x2={CHART_WIDTH - CHART_PAD_RIGHT}
+                y2={y}
+                class="guide-line"
+              />
+              <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{new Intl.NumberFormat().format(tick)}</text>
+            {/each}
+
+            {#if activitySmoothPath}
+              <path d={activitySmoothPath} class="trend-path trend-path-smooth" />
+            {/if}
+            {#if activityPath}
+              <path d={activityPath} class="trend-path trend-path-raw" />
+            {/if}
+
+            {#if activityDotCount <= 40}
+              {#each activityRawPoints as point (point.key)}
+                <circle cx={point.x} cy={point.y} r="2.6" class="trend-dot trend-dot-raw" />
+              {/each}
+            {/if}
+
+            <line
+              x1={CHART_PAD_LEFT}
+              y1={CHART_PAD_TOP}
+              x2={CHART_PAD_LEFT}
+              y2={CHART_HEIGHT - CHART_PAD_BOTTOM}
+              class="axis-line"
+            />
+            <line
+              x1={CHART_PAD_LEFT}
+              y1={CHART_HEIGHT - CHART_PAD_BOTTOM}
+              x2={CHART_WIDTH - CHART_PAD_RIGHT}
+              y2={CHART_HEIGHT - CHART_PAD_BOTTOM}
+              class="axis-line"
+            />
+
+            {#each xTicks as tick (tick.date)}
+              <text
+                x={tick.x}
+                y={CHART_HEIGHT - 8}
+                text-anchor="middle"
+                class="axis-label"
+              >
+                {tick.label}
+              </text>
+            {/each}
+          </svg>
+        </div>
+
+        <div class="trend-footer">
+          <p>{chartResolution === "weekly" ? "Weekly mean steps" : "Daily steps"} across the visible range with a light rolling average overlay.</p>
         </div>
       </article>
 
@@ -261,145 +424,203 @@
             <p class="eyebrow">Trend</p>
             <h2>Readiness trend</h2>
           </div>
-          <div class="section-metrics">
-            <span>Latest {latestDay?.readiness?.score ?? "--"}</span>
-            <span>Avg {averageReadiness ? Math.round(averageReadiness) : "--"}</span>
-          </div>
         </div>
 
         <div class="trend-wrap">
-          <svg viewBox={`0 0 ${READINESS_CHART_WIDTH} ${READINESS_CHART_HEIGHT}`} aria-label="Readiness trend">
+          <div class="chart-stat-badge readiness-stat-badge">
+            <span>Average readiness</span>
+            <strong>{averageReadiness ? Math.round(averageReadiness) : "--"}</strong>
+          </div>
+          <svg viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} aria-label="Readiness trend">
+            {#each weekendBands as band}
+              <rect
+                x={band.x}
+                y={CHART_PAD_TOP}
+                width={band.width}
+                height={CHART_HEIGHT - CHART_PAD_TOP - CHART_PAD_BOTTOM}
+                class="weekend-band"
+              />
+            {/each}
             {#each READINESS_TICKS as tick}
               {@const y = readinessY(tick)}
               <line
-                x1={READINESS_CHART_PAD_LEFT}
+                x1={CHART_PAD_LEFT}
                 y1={y}
-                x2={READINESS_CHART_WIDTH - READINESS_CHART_PAD_RIGHT}
+                x2={CHART_WIDTH - CHART_PAD_RIGHT}
                 y2={y}
                 class="guide-line"
               />
-              <text x={READINESS_CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{tick}</text>
+              <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{tick}</text>
             {/each}
 
+            {#if readinessSmoothPath}
+              <path d={readinessSmoothPath} class="trend-path trend-path-smooth" />
+            {/if}
             {#if readinessPath}
-              <path d={readinessPath} class="trend-path" />
+              <path d={readinessPath} class="trend-path trend-path-raw" />
             {/if}
 
-            {#if readinessDotCount <= 62}
-              {#each readinessPoints as point}
-                {#if point}
-                  <circle cx={point.x} cy={point.y} r="3" class="trend-dot" />
-                {/if}
+            {#if readinessDotCount <= 40}
+              {#each readinessRawPoints as point (point.key)}
+                <circle cx={point.x} cy={point.y} r="2.6" class="trend-dot trend-dot-raw" />
               {/each}
             {/if}
 
             <line
-              x1={READINESS_CHART_PAD_LEFT}
-              y1={READINESS_CHART_PAD_TOP}
-              x2={READINESS_CHART_PAD_LEFT}
-              y2={READINESS_CHART_HEIGHT - READINESS_CHART_PAD_BOTTOM}
+              x1={CHART_PAD_LEFT}
+              y1={CHART_PAD_TOP}
+              x2={CHART_PAD_LEFT}
+              y2={CHART_HEIGHT - CHART_PAD_BOTTOM}
               class="axis-line"
             />
             <line
-              x1={READINESS_CHART_PAD_LEFT}
-              y1={READINESS_CHART_HEIGHT - READINESS_CHART_PAD_BOTTOM}
-              x2={READINESS_CHART_WIDTH - READINESS_CHART_PAD_RIGHT}
-              y2={READINESS_CHART_HEIGHT - READINESS_CHART_PAD_BOTTOM}
+              x1={CHART_PAD_LEFT}
+              y1={CHART_HEIGHT - CHART_PAD_BOTTOM}
+              x2={CHART_WIDTH - CHART_PAD_RIGHT}
+              y2={CHART_HEIGHT - CHART_PAD_BOTTOM}
               class="axis-line"
             />
 
-            {#each visibleDays as day, index}
-              {#if showTick(index, visibleDays.length)}
-                <text
-                  x={readinessX(index, visibleDays.length)}
-                  y={READINESS_CHART_HEIGHT - 8}
-                  text-anchor="middle"
-                  class="axis-label"
-                >
-                  {formatMonthDayCompact(day.date)}
-                </text>
-              {/if}
+            {#each xTicks as tick (tick.date)}
+              <text
+                x={tick.x}
+                y={CHART_HEIGHT - 8}
+                text-anchor="middle"
+                class="axis-label"
+              >
+                {tick.label}
+              </text>
             {/each}
           </svg>
         </div>
 
         <div class="trend-footer">
-          <p>Daily readiness score across the visible range.</p>
+          <p>{chartResolution === "weekly" ? "Weekly mean readiness" : "Daily readiness"} with the same rolling average overlay.</p>
         </div>
       </article>
 
       <article class="panel sleep-panel">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Sleep Strip</p>
-            <h2>Night timeline</h2>
+            <p class="eyebrow">Night Axis</p>
+            <h2>Sleep timing</h2>
           </div>
-          <p class="section-note">Shared vertical time axis from 6pm to 12pm next day, using the main nightly sleep and keeping naps as a side count.</p>
+          <p class="section-note">Bedtime and wake time on a shared vertical axis from 6pm to 12pm next day, using weekly medians when the window gets long.</p>
         </div>
 
-        <div class="sleep-layout">
-          <div class="sleep-axis">
-            {#each SLEEP_AXIS_LABELS as tick}
-              <span style={`top:${tick.percent}%;`}>{tick.label}</span>
+        <div class="trend-wrap sleep-wrap">
+          <div class="chart-stat-badge sleep-stat-badge">
+            <span>Average sleep</span>
+            <strong>{minutesToHoursLabel(Math.round(averageSleep ?? 0) || undefined)}</strong>
+          </div>
+          <svg viewBox={`0 0 ${CHART_WIDTH} ${SLEEP_CHART_HEIGHT}`} aria-label="Sleep timing trend">
+            {#each weekendBands as band}
+              <rect
+                x={band.x}
+                y={CHART_PAD_TOP}
+                width={band.width}
+                height={SLEEP_CHART_HEIGHT - CHART_PAD_TOP - CHART_PAD_BOTTOM}
+                class="weekend-band"
+              />
             {/each}
-          </div>
+            {#each SLEEP_AXIS_LABELS as tick}
+              {@const y = sleepY((tick.percent / 100) * SLEEP_AXIS_MAX_MINUTES)}
+              <line
+                x1={CHART_PAD_LEFT}
+                y1={y}
+                x2={CHART_WIDTH - CHART_PAD_RIGHT}
+                y2={y}
+                class="guide-line"
+              />
+              <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{tick.label}</text>
+            {/each}
 
-          <div class="sleep-frame">
-            <div class="sleep-grid {chartMode}" style={`--day-count:${visibleDays.length}; --grid-gap:${chartGap}px;`}>
-              {#each visibleDays as day, index}
-                {@const position = sleepPosition(day.sleep)}
-                <article class:missing={!position} class="sleep-day">
-                  <div class="sleep-track">
-                    {#each SLEEP_AXIS_LABELS as tick}
-                      <div class="sleep-guide" style={`top:${tick.percent}%;`}></div>
-                    {/each}
-                    {#if position}
-                      <div
-                        class="sleep-bar"
-                        style={`top:${position.top}%; height:${position.height}%; opacity:${sleepOpacity(day.sleep)};`}
-                        title={`${clockTimeLabel(day.sleep?.start_time)} - ${clockTimeLabel(day.sleep?.end_time)}`}
-                      ></div>
-                    {/if}
-                  </div>
+            {#if sleepBandPath}
+              <path d={sleepBandPath} class="sleep-band" />
+            {/if}
+            {#if sleepStartPath}
+              <path d={sleepStartPath} class="trend-path sleep-start-path" />
+            {/if}
+            {#if sleepEndPath}
+              <path d={sleepEndPath} class="trend-path sleep-end-path" />
+            {/if}
 
-                  <div class="sleep-meta">
-                    <strong>{minutesToHoursLabel(day.sleep?.duration_minutes)}</strong>
-                    <span>{day.sleep?.naps_count ? `${day.sleep.naps_count} nap` : ""}</span>
-                    {#if showTick(index, visibleDays.length)}
-                      <small>{formatMonthDayCompact(day.date)}</small>
-                    {/if}
-                  </div>
-                </article>
+            {#if sleepDotCount <= 40}
+              {#each sleepStartPoints as point (point.key)}
+                <circle cx={point.x} cy={point.y} r="2.5" class="trend-dot sleep-start-dot" />
               {/each}
-            </div>
-          </div>
+              {#each sleepEndPoints as point (point.key)}
+                <circle cx={point.x} cy={point.y} r="2.5" class="trend-dot sleep-end-dot" />
+              {/each}
+            {/if}
+
+            <line
+              x1={CHART_PAD_LEFT}
+              y1={CHART_PAD_TOP}
+              x2={CHART_PAD_LEFT}
+              y2={SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM}
+              class="axis-line"
+            />
+            <line
+              x1={CHART_PAD_LEFT}
+              y1={SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM}
+              x2={CHART_WIDTH - CHART_PAD_RIGHT}
+              y2={SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM}
+              class="axis-line"
+            />
+
+            {#each xTicks as tick (tick.date)}
+              <text
+                x={tick.x}
+                y={SLEEP_CHART_HEIGHT - 8}
+                text-anchor="middle"
+                class="axis-label"
+              >
+                {tick.label}
+              </text>
+            {/each}
+          </svg>
+        </div>
+
+        <div class="trend-legend">
+          <span class="legend-line">
+            <span class="line-swatch sleep-start-swatch"></span>
+            Sleep start
+          </span>
+          <span class="legend-line">
+            <span class="line-swatch sleep-end-swatch"></span>
+            Sleep end
+          </span>
+        </div>
+
+        <div class="trend-footer">
+          <p>{chartResolution === "weekly" ? "Weekly median" : "Daily"} sleep start and end times on the same night axis. Typical sleep duration in range: {minutesToHoursLabel(Math.round(averageSleep ?? 0) || undefined)}.</p>
         </div>
       </article>
 
       <article class="panel export-panel">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">Export</p>
-            <h2>Downloads over the same stored records</h2>
+        <div class="export-stack">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Export</p>
+              <h2>Visualised data</h2>
+            </div>
           </div>
-        </div>
 
-        <div class="export-actions">
-          <a class="button button-primary" href={dashboard.export_urls.canonical_csv} download="somascope-canonical.csv">Download CSV</a>
-          <a class="button button-ghost" href={dashboard.export_urls.canonical_jsonl} download="somascope-canonical.jsonl">Download JSONL</a>
-        </div>
-
-        {#if plannedFormats.length}
-          <div class="planned-list">
-            {#each plannedFormats as format}
-              <article class="planned-card">
-                <strong>{format.label}</strong>
-                <span>{format.description}</span>
-                <small>{format.status}</small>
-              </article>
-            {/each}
+          <div class="export-actions">
+            <a class="button button-primary" href={dashboard.export_urls.canonical_csv} download="somascope-visualised-data.csv">CSV</a>
+            <a class="button button-ghost" href={dashboard.export_urls.canonical_jsonl} download="somascope-visualised-data.jsonl">JSONL</a>
           </div>
-        {/if}
+
+          {#if rawOuraExportURL}
+            <div class="export-subhead">
+              <p class="eyebrow">Raw provider data</p>
+            </div>
+            <div class="export-actions">
+              <a class="button button-ghost" href={rawOuraExportURL} download="somascope-oura-raw.jsonl">Oura JSONL</a>
+            </div>
+          {/if}
+        </div>
       </article>
     </section>
   {/if}
@@ -409,7 +630,6 @@
   .dashboard-shell,
   .hero-stats,
   .visual-grid,
-  .planned-list,
   .hero-actions,
   .controls-strip {
     display: grid;
@@ -447,13 +667,19 @@
   .toolbar,
   .period-group,
   .nav-group,
-  .legend-row,
-  .export-actions,
-  .section-metrics {
+  .trend-legend {
     display: flex;
     gap: 12px;
     align-items: center;
     justify-content: space-between;
+  }
+
+  .export-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .eyebrow {
@@ -464,23 +690,15 @@
     font-size: 12px;
   }
 
-  h1,
   h2,
   p {
     margin: 0;
-  }
-
-  h1 {
-    max-width: 12ch;
-    font-size: clamp(2rem, 4.6vw, 3.35rem);
-    line-height: 0.95;
   }
 
   h2 {
     font-size: 1.55rem;
   }
 
-  .lede,
   .section-note,
   .trend-footer p,
   .window-copy {
@@ -488,26 +706,22 @@
     line-height: 1.5;
   }
 
-  .lede {
-    max-width: 52rem;
-    margin-top: 14px;
-  }
-
   .hero-actions {
     position: relative;
     z-index: 1;
     gap: 8px;
+    display: inline-flex;
+    flex-wrap: nowrap;
   }
 
   .hero-stats {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    margin-top: 24px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 12px;
     position: relative;
     z-index: 1;
   }
 
-  .hero-stats article,
-  .planned-card {
+  .hero-stats article {
     border: 1px solid var(--line);
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.56);
@@ -521,8 +735,7 @@
     margin-bottom: 8px;
   }
 
-  .hero-stats span,
-  .planned-card span {
+  .hero-stats span {
     color: var(--muted);
     font-size: 0.95rem;
   }
@@ -583,165 +796,37 @@
     margin-top: 18px;
   }
 
-  .activity-grid,
-  .sleep-grid {
-    display: grid;
-    grid-template-columns: repeat(var(--day-count), minmax(0, 1fr));
-    gap: var(--grid-gap);
-    align-items: end;
-    min-width: 0;
-  }
-
-  .activity-day,
-  .sleep-day {
-    display: grid;
-    gap: 10px;
-    min-width: 0;
-  }
-
-  .activity-day.missing,
-  .sleep-day.missing {
-    opacity: 0.48;
-  }
-
-  .block-frame,
-  .sleep-frame {
-    width: 100%;
-    min-width: 0;
-    overflow: hidden;
-    padding-bottom: 4px;
-  }
-
-  .day-head,
-  .day-meta,
-  .sleep-meta {
-    display: grid;
-    gap: 4px;
-  }
-
-  .day-head small,
-  .day-meta small,
-  .sleep-meta small {
-    color: var(--muted);
-    font-size: 0.72rem;
-    min-height: 1rem;
-  }
-
-  .score-pill {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 2rem;
-    padding: 6px 10px;
-    border-radius: 999px;
-    width: fit-content;
-    background: rgba(91, 109, 99, 0.12);
-    font-size: 0.92rem;
-  }
-
-  .score-pill.excellent {
-    background: rgba(53, 128, 82, 0.16);
-    color: #1f6c40;
-  }
-
-  .score-pill.steady {
-    background: rgba(26, 106, 114, 0.16);
-    color: #115158;
-  }
-
-  .score-pill.watch {
-    background: rgba(196, 136, 51, 0.17);
-    color: #875a14;
-  }
-
-  .score-pill.low {
-    background: rgba(163, 73, 56, 0.16);
-    color: #8a3324;
-  }
-
-  .segments {
-    height: 250px;
-    border-radius: 12px;
-    border: 1px solid var(--line);
-    overflow: hidden;
-    background: rgba(255, 255, 255, 0.52);
-    display: flex;
-    flex-direction: column;
-    justify-content: end;
-  }
-
-  .segment {
-    width: 100%;
-  }
-
-  .segment-empty {
-    flex: 1;
-    background:
-      repeating-linear-gradient(
-        -45deg,
-        rgba(91, 109, 99, 0.05),
-        rgba(91, 109, 99, 0.05) 8px,
-        transparent 8px,
-        transparent 16px
-      );
-  }
-
-  .segment.high,
-  .legend-item.high::before {
-    background: #17656f;
-  }
-
-  .segment.medium,
-  .legend-item.medium::before {
-    background: #4d8d8a;
-  }
-
-  .segment.low,
-  .legend-item.low::before {
-    background: #97b6a8;
-  }
-
-  .segment.rest,
-  .legend-item.rest::before {
-    background: #e6d7b3;
-  }
-
-  .segment.off,
-  .legend-item.off::before {
-    background: #d7d5cf;
-  }
-
-  .legend-row {
+  .trend-legend {
     justify-content: flex-start;
     flex-wrap: wrap;
-    margin: 16px 0 12px;
+    margin-top: 16px;
   }
 
-  .legend-item {
+  .legend-line {
     display: inline-flex;
-    gap: 8px;
     align-items: center;
+    gap: 8px;
     color: var(--muted);
     font-size: 0.92rem;
   }
 
-  .legend-item::before {
-    content: "";
-    width: 12px;
-    height: 12px;
+  .line-swatch {
+    width: 20px;
+    height: 0;
+    border-top: 3px solid currentColor;
     border-radius: 999px;
   }
 
-  .day-meta span,
-  .sleep-meta strong {
-    font-size: 0.78rem;
+  .line-swatch-raw {
+    color: rgba(26, 106, 114, 0.34);
   }
 
-  .day-meta span {
-    color: var(--ink);
+  .line-swatch-smooth {
+    color: var(--accent);
   }
 
   .trend-wrap {
+    position: relative;
     margin-top: 20px;
     border-radius: 20px;
     border: 1px solid var(--line);
@@ -755,9 +840,53 @@
     display: block;
   }
 
+  .chart-stat-badge {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 1;
+    display: grid;
+    gap: 2px;
+    min-width: 118px;
+    padding: 10px 12px;
+    border: 1px solid rgba(28, 58, 52, 0.12);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.88);
+    box-shadow: 0 8px 22px rgba(24, 32, 25, 0.08);
+    text-align: right;
+  }
+
+  .chart-stat-badge span {
+    color: var(--muted);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .chart-stat-badge strong {
+    font-size: 1.05rem;
+    line-height: 1.1;
+  }
+
+  .sleep-stat-badge {
+    background: rgba(248, 252, 253, 0.9);
+  }
+
+  .activity-stat-badge {
+    background: rgba(248, 252, 251, 0.9);
+  }
+
+  .readiness-stat-badge {
+    background: rgba(249, 251, 252, 0.9);
+  }
+
   .guide-line {
     stroke: rgba(24, 32, 25, 0.1);
     stroke-width: 0.8;
+  }
+
+  .weekend-band {
+    fill: rgba(24, 32, 25, 0.045);
   }
 
   .axis-line {
@@ -772,16 +901,27 @@
 
   .trend-path {
     fill: none;
-    stroke: var(--accent);
     stroke-width: 2.6;
     stroke-linecap: round;
     stroke-linejoin: round;
   }
 
+  .trend-path-raw {
+    stroke: rgba(26, 106, 114, 0.34);
+    stroke-width: 1.9;
+  }
+
+  .trend-path-smooth {
+    stroke: var(--accent);
+  }
+
   .trend-dot {
-    fill: var(--accent);
     stroke: rgba(255, 255, 255, 0.9);
     stroke-width: 1.25;
+  }
+
+  .trend-dot-raw {
+    fill: rgba(26, 106, 114, 0.42);
   }
 
   .trend-footer {
@@ -790,100 +930,54 @@
     margin-top: 10px;
   }
 
-  .sleep-layout {
+  .export-stack {
     display: grid;
-    grid-template-columns: 40px 1fr;
-    gap: 12px;
-    margin-top: 18px;
+    gap: 18px;
   }
 
-  .sleep-axis {
-    position: relative;
-    min-height: 250px;
+  .export-subhead {
+    display: grid;
+    gap: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--line);
   }
 
-  .sleep-axis span {
-    position: absolute;
-    transform: translateY(-50%);
-    color: var(--muted);
-    font-size: 0.76rem;
+  .sleep-wrap {
+    background: linear-gradient(180deg, rgba(28, 58, 92, 0.1), rgba(255, 255, 255, 0.58));
   }
 
-  .sleep-track {
-    position: relative;
-    height: 250px;
-    border-radius: 12px;
-    border: 1px solid var(--line);
-    background: rgba(255, 255, 255, 0.52);
-    overflow: hidden;
+  .sleep-band {
+    fill: rgba(38, 94, 126, 0.12);
+    stroke: none;
   }
 
-  .sleep-guide {
-    position: absolute;
-    left: 0;
-    right: 0;
-    height: 1px;
-    background: rgba(24, 32, 25, 0.08);
+  .sleep-start-path,
+  .sleep-start-swatch {
+    color: #24557b;
+    stroke: #24557b;
   }
 
-  .sleep-bar {
-    position: absolute;
-    left: 18%;
-    right: 18%;
-    border-radius: 999px;
-    background: linear-gradient(180deg, rgba(38, 94, 126, 0.92), rgba(91, 154, 164, 0.74));
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.24);
+  .sleep-end-path,
+  .sleep-end-swatch {
+    color: #63a19c;
+    stroke: #63a19c;
   }
 
-  .sleep-meta span {
-    color: var(--muted);
-    min-height: 1rem;
-    font-size: 0.72rem;
+  .sleep-start-dot {
+    fill: #24557b;
   }
 
-  .planned-list {
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    margin-top: 16px;
-  }
-
-  .planned-card small {
-    display: inline-block;
-    margin-top: 10px;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+  .sleep-end-dot {
+    fill: #63a19c;
   }
 
   .empty-panel {
     margin-top: 18px;
   }
 
-  .dense .segments,
-  .dense .sleep-track {
-    height: 220px;
-  }
-
-  .dense .score-pill,
-  .dense .day-meta span,
-  .dense .sleep-meta strong,
-  .micro .score-pill,
-  .micro .day-meta span,
-  .micro .sleep-meta strong {
-    display: none;
-  }
-
-  .micro .segments,
-  .micro .sleep-track {
-    height: 180px;
-  }
-
   @media (max-width: 900px) {
     .hero-stats {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .sleep-layout {
-      grid-template-columns: 30px 1fr;
     }
   }
 
@@ -896,14 +990,6 @@
     .section-head {
       align-items: flex-start;
       flex-direction: column;
-    }
-
-    .sleep-layout {
-      grid-template-columns: 1fr;
-    }
-
-    .sleep-axis {
-      display: none;
     }
   }
 
@@ -919,10 +1005,16 @@
 
     .hero-actions {
       width: 100%;
+      flex-wrap: wrap;
     }
 
     .text-link {
       text-align: center;
+    }
+
+    .chart-stat-badge {
+      min-width: 102px;
+      padding: 8px 10px;
     }
   }
 </style>

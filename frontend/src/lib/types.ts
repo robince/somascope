@@ -204,6 +204,7 @@ export type DashboardOverview = {
   export_urls: {
     canonical_jsonl: string;
     canonical_csv: string;
+    raw_jsonl_by_provider?: Partial<Record<ProviderName, string>>;
   };
   daily: DashboardDay[];
 };

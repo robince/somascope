@@ -78,3 +78,52 @@ func TestCanonicalExportRowsIncludesRecordsAndSleep(t *testing.T) {
 		t.Fatalf("unexpected row types: %+v", rows)
 	}
 }
+
+func TestRawExportRowsFiltersByProvider(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "somascope.db")
+
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.UpsertRawDocument(ctx, RawDocument{
+		Provider:     "oura",
+		DocumentKind: "daily_activity",
+		ExternalID:   "activity-1",
+		LocalDate:    "2026-03-20",
+		Payload:      json.RawMessage(`{"id":"activity-1","steps":12345}`),
+		FetchedAt:    "2026-03-20T10:00:00Z",
+		DocumentKey:  "daily_activity:activity-1",
+	}); err != nil {
+		t.Fatalf("insert oura raw document: %v", err)
+	}
+
+	if _, err := store.UpsertRawDocument(ctx, RawDocument{
+		Provider:     "fitbit",
+		DocumentKind: "sleep",
+		ExternalID:   "sleep-1",
+		LocalDate:    "2026-03-20",
+		Payload:      json.RawMessage(`{"logId":"sleep-1"}`),
+		FetchedAt:    "2026-03-20T11:00:00Z",
+		DocumentKey:  "sleep:sleep-1",
+	}); err != nil {
+		t.Fatalf("insert fitbit raw document: %v", err)
+	}
+
+	rows, err := store.RawExportRows(ctx, "oura")
+	if err != nil {
+		t.Fatalf("raw export rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 raw export row, got %d", len(rows))
+	}
+	if rows[0].RecordType != "raw_document" {
+		t.Fatalf("expected raw_document record_type, got %q", rows[0].RecordType)
+	}
+	if rows[0].Provider != "oura" || rows[0].DocumentKind != "daily_activity" {
+		t.Fatalf("unexpected raw export row: %+v", rows[0])
+	}
+}

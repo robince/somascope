@@ -73,6 +73,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/dashboard/overview", s.handleDashboardOverview)
 	s.mux.HandleFunc("GET /api/v1/export/formats", s.handleExportFormats)
 	s.mux.HandleFunc("GET /api/v1/export/canonical", s.handleExportCanonical)
+	s.mux.HandleFunc("GET /api/v1/export/raw", s.handleExportRaw)
 	s.mux.HandleFunc("GET /api/v1/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/v1/settings", s.handlePutSettings)
 	s.mux.HandleFunc("GET /api/v1/providers/oura/status", s.handleOuraStatus)
@@ -211,6 +212,70 @@ func (s *Server) handleExportCanonical(w http.ResponseWriter, r *http.Request) {
 		writer.Flush()
 		if err := writer.Error(); err != nil {
 			log.Printf("warning: failed flushing canonical CSV: %v", err)
+		}
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported export format %q", format))
+	}
+}
+
+func (s *Server) handleExportRaw(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("local store unavailable"))
+		return
+	}
+
+	provider := strings.TrimSpace(r.URL.Query().Get("provider"))
+	if provider == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing provider"))
+		return
+	}
+
+	rows, err := s.store.RawExportRows(r.Context(), provider)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	format := r.URL.Query().Get("format")
+	switch format {
+	case "", "jsonl":
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		for _, row := range rows {
+			if err := json.NewEncoder(w).Encode(row); err != nil {
+				log.Printf("warning: failed writing raw JSONL row: %v", err)
+				return
+			}
+		}
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		writer := csv.NewWriter(w)
+		if err := writer.Write([]string{
+			"record_type", "provider", "document_kind", "local_date", "zone_offset",
+			"external_id", "fetched_at", "document_key", "raw_document_id", "payload_json",
+		}); err != nil {
+			log.Printf("warning: failed writing raw CSV header: %v", err)
+			return
+		}
+		for _, row := range rows {
+			if err := writer.Write([]string{
+				row.RecordType,
+				row.Provider,
+				row.DocumentKind,
+				row.LocalDate,
+				row.ZoneOffset,
+				row.ExternalID,
+				row.FetchedAt,
+				row.DocumentKey,
+				fmt.Sprintf("%d", row.RawDocumentID),
+				string(row.Payload),
+			}); err != nil {
+				log.Printf("warning: failed writing raw CSV row: %v", err)
+				return
+			}
+		}
+		writer.Flush()
+		if err := writer.Error(); err != nil {
+			log.Printf("warning: failed flushing raw CSV: %v", err)
 		}
 	default:
 		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported export format %q", format))
