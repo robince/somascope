@@ -85,11 +85,16 @@
     return (["fitbit", "oura"] as const).map((provider) => mapped.get(provider)!);
   }
 
+  function viewFromLocation(pathname: string, hash: string): AppView {
+    const normalizedPath = pathname.replace(/\/+$/, "") || "/";
+    return normalizedPath.endsWith("/settings") || hash === "#settings" ? "settings" : "dashboard";
+  }
+
   function syncViewFromLocation() {
     if (typeof window === "undefined") {
       return;
     }
-    activeView = window.location.pathname === "/settings" || window.location.hash === "#settings" ? "settings" : "dashboard";
+    activeView = viewFromLocation(window.location.pathname, window.location.hash);
   }
 
   function syncBusyFromStatus(status: OuraStatus | null) {
@@ -203,22 +208,26 @@
     }
   }
 
-  async function setActiveView(view: AppView, anchor = "") {
+  async function scrollToAnchor(anchor: string) {
+    await tick();
+    document.getElementById(anchor)?.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+  }
+
+  function setActiveView(view: AppView, anchor = "") {
+    activeView = view;
+
     if (typeof window !== "undefined") {
       const nextPath = view === "settings" ? "/settings" : "/";
       const nextUrl = anchor ? `${nextPath}#${anchor}` : nextPath;
-      window.history.pushState({}, "", nextUrl);
-      syncViewFromLocation();
-      if (anchor) {
-        await tick();
-        document.getElementById(anchor)?.scrollIntoView({
-          behavior: "smooth",
-          block: "start"
-        });
-      }
-      return;
+      window.history.pushState({ view }, "", nextUrl);
     }
-    activeView = view;
+
+    if (anchor) {
+      void scrollToAnchor(anchor);
+    }
   }
 
   function updateProvider(index: number, field: keyof ProviderSettings, value: string | boolean) {
@@ -464,7 +473,7 @@
     </nav>
   </header>
 
-  {#if activeView === "dashboard"}
+  <section hidden={activeView !== "dashboard"} aria-hidden={activeView !== "dashboard"}>
     <DashboardView
       {dashboard}
       {formats}
@@ -479,7 +488,9 @@
       onOpenSettings={(anchor?: string) => void setActiveView("settings", anchor)}
       onSyncIncremental={() => void syncOuraIncremental()}
     />
-  {:else}
+  </section>
+
+  <section hidden={activeView !== "settings"} aria-hidden={activeView !== "settings"}>
     <SettingsView
       {appInfo}
       {formats}
@@ -508,7 +519,7 @@
       onTimezoneInput={updateTimezone}
       onProviderInput={updateProvider}
     />
-  {/if}
+  </section>
 </main>
 
 <style>
