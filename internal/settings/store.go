@@ -1,13 +1,17 @@
 package settings
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"slices"
 	"time"
+
+	appstore "github.com/robince/somascope/internal/store"
 )
+
+const userTimezoneKey = "settings:user_timezone"
+const legacyOuraDefaultScopes = "email personal daily heartrate tag workout session spo2"
 
 type Settings struct {
 	UserTimezone string           `json:"user_timezone"`
@@ -25,185 +29,132 @@ type ProviderConfig struct {
 }
 
 type Store struct {
-	path string
+	app *appstore.Store
+}
+
+func NewStore(app *appstore.Store) *Store {
+	return &Store{app: app}
 }
 
 func (s *Store) Provider(name string) (ProviderConfig, error) {
-	fileCfg, err := s.loadFile()
+	if s.app == nil {
+		return ProviderConfig{}, errors.New("settings store requires sqlite app store")
+	}
+
+	defaults, ok := findDefaultProvider(name)
+	if !ok {
+		return ProviderConfig{}, os.ErrNotExist
+	}
+
+	credential, err := s.app.ProviderCredentialByProvider(context.Background(), name)
+	if errors.Is(err, appstore.ErrNotFound) {
+		return defaults, nil
+	}
 	if err != nil {
 		return ProviderConfig{}, err
 	}
 
-	for _, provider := range defaultProviders() {
-		if provider.Provider != name {
-			continue
-		}
-		stored := fileCfg.Providers[name]
-		return ProviderConfig{
-			Provider:      name,
-			Configured:    providerConfigured(stored),
-			ClientID:      stored.ClientID,
-			ClientSecret:  stored.ClientSecret,
-			RedirectURI:   stored.RedirectURI,
-			DefaultScopes: stored.DefaultScopes,
-			Notes:         stored.Notes,
-		}, nil
-	}
-
-	return ProviderConfig{}, os.ErrNotExist
-}
-
-type fileSettings struct {
-	Version      int                    `json:"version"`
-	UserTimezone string                 `json:"user_timezone"`
-	Providers    map[string]storedCreds `json:"providers"`
-}
-
-type storedCreds struct {
-	ClientID      string `json:"client_id"`
-	ClientSecret  string `json:"client_secret"`
-	RedirectURI   string `json:"redirect_uri"`
-	DefaultScopes string `json:"default_scopes"`
-	Notes         string `json:"notes"`
-}
-
-func NewStore(path string) *Store {
-	return &Store{path: path}
+	credential = normalizeCredential(name, credential)
+	out := defaults
+	out.Configured = providerConfigured(credential)
+	out.ClientID = credential.ClientID
+	out.ClientSecret = credential.ClientSecret
+	out.RedirectURI = credential.RedirectURI
+	out.DefaultScopes = credential.DefaultScopes
+	out.Notes = credential.Notes
+	return out, nil
 }
 
 func (s *Store) Load() (Settings, error) {
-	fileCfg, err := s.loadFile()
+	if s.app == nil {
+		return Settings{}, errors.New("settings store requires sqlite app store")
+	}
+
+	ctx := context.Background()
+	userTimezone, err := s.app.AppSetting(ctx, userTimezoneKey)
+	if errors.Is(err, appstore.ErrNotFound) || userTimezone == "" {
+		userTimezone = defaultTimezone()
+	} else if err != nil {
+		return Settings{}, err
+	}
+
+	credentials, err := s.app.ProviderCredentials(ctx)
 	if err != nil {
 		return Settings{}, err
 	}
-	return publicSettings(fileCfg), nil
+
+	byProvider := map[string]appstore.ProviderCredential{}
+	for _, credential := range credentials {
+		byProvider[credential.Provider] = credential
+	}
+
+	out := Settings{
+		UserTimezone: userTimezone,
+		Providers:    make([]ProviderConfig, 0, len(defaultProviders())),
+	}
+	for _, defaults := range defaultProviders() {
+		credential, ok := byProvider[defaults.Provider]
+		if !ok {
+			out.Providers = append(out.Providers, defaults)
+			continue
+		}
+
+		credential = normalizeCredential(defaults.Provider, credential)
+		provider := defaults
+		provider.Configured = providerConfigured(credential)
+		provider.ClientID = credential.ClientID
+		provider.ClientSecret = ""
+		provider.RedirectURI = credential.RedirectURI
+		provider.DefaultScopes = credential.DefaultScopes
+		provider.Notes = credential.Notes
+		out.Providers = append(out.Providers, provider)
+	}
+
+	return out, nil
 }
 
 func (s *Store) Update(next Settings) (Settings, error) {
-	current, err := s.loadFile()
-	if err != nil {
+	if s.app == nil {
+		return Settings{}, errors.New("settings store requires sqlite app store")
+	}
+
+	ctx := context.Background()
+	userTimezone := next.UserTimezone
+	if userTimezone == "" {
+		userTimezone = defaultTimezone()
+	}
+	if err := s.app.SetAppSetting(ctx, userTimezoneKey, userTimezone); err != nil {
 		return Settings{}, err
 	}
 
-	current.UserTimezone = next.UserTimezone
-	if current.UserTimezone == "" {
-		current.UserTimezone = defaultTimezone()
-	}
-
-	for _, provider := range defaultProviders() {
-		incoming, ok := findProvider(next.Providers, provider.Provider)
+	for _, defaults := range defaultProviders() {
+		incoming, ok := findProvider(next.Providers, defaults.Provider)
 		if !ok {
 			continue
 		}
 
-		stored := current.Providers[provider.Provider]
-		stored.ClientID = incoming.ClientID
+		current, err := s.app.ProviderCredentialByProvider(ctx, defaults.Provider)
+		if errors.Is(err, appstore.ErrNotFound) {
+			current = providerToCredential(defaults)
+		} else if err != nil {
+			return Settings{}, err
+		}
+
+		current.ClientID = incoming.ClientID
 		if incoming.ClientSecret != "" {
-			stored.ClientSecret = incoming.ClientSecret
+			current.ClientSecret = incoming.ClientSecret
 		}
-		stored.RedirectURI = incoming.RedirectURI
-		stored.DefaultScopes = incoming.DefaultScopes
-		stored.Notes = incoming.Notes
-		current.Providers[provider.Provider] = normalizeStored(provider.Provider, stored)
-	}
+		current.RedirectURI = incoming.RedirectURI
+		current.DefaultScopes = incoming.DefaultScopes
+		current.Notes = incoming.Notes
+		current = normalizeCredential(defaults.Provider, current)
 
-	if err := s.saveFile(current); err != nil {
-		return Settings{}, err
-	}
-
-	return publicSettings(current), nil
-}
-
-func (s *Store) loadFile() (fileSettings, error) {
-	defaults := defaultFileSettings()
-
-	data, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return defaults, nil
-	}
-	if err != nil {
-		return fileSettings{}, err
-	}
-
-	var parsed fileSettings
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return fileSettings{}, err
-	}
-
-	if parsed.UserTimezone == "" {
-		parsed.UserTimezone = defaults.UserTimezone
-	}
-	if parsed.Providers == nil {
-		parsed.Providers = map[string]storedCreds{}
-	}
-
-	for _, provider := range defaultProviders() {
-		stored := providerToStored(provider)
-		if existing, ok := parsed.Providers[provider.Provider]; ok {
-			stored.ClientID = existing.ClientID
-			stored.ClientSecret = existing.ClientSecret
-			if existing.RedirectURI != "" {
-				stored.RedirectURI = existing.RedirectURI
-			}
-			if existing.DefaultScopes != "" {
-				stored.DefaultScopes = existing.DefaultScopes
-			}
-			if existing.Notes != "" {
-				stored.Notes = existing.Notes
-			}
+		if err := s.app.UpsertProviderCredential(ctx, current); err != nil {
+			return Settings{}, err
 		}
-		parsed.Providers[provider.Provider] = normalizeStored(provider.Provider, stored)
 	}
 
-	return parsed, nil
-}
-
-func (s *Store) saveFile(value fileSettings) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return os.WriteFile(s.path, data, 0o600)
-}
-
-func publicSettings(fileCfg fileSettings) Settings {
-	out := Settings{
-		UserTimezone: fileCfg.UserTimezone,
-		Providers:    make([]ProviderConfig, 0, len(defaultProviders())),
-	}
-
-	for _, provider := range defaultProviders() {
-		stored := fileCfg.Providers[provider.Provider]
-		out.Providers = append(out.Providers, ProviderConfig{
-			Provider:      provider.Provider,
-			Configured:    providerConfigured(stored),
-			ClientID:      stored.ClientID,
-			ClientSecret:  "",
-			RedirectURI:   stored.RedirectURI,
-			DefaultScopes: stored.DefaultScopes,
-			Notes:         stored.Notes,
-		})
-	}
-
-	return out
-}
-
-func defaultFileSettings() fileSettings {
-	providers := map[string]storedCreds{}
-	for _, provider := range defaultProviders() {
-		providers[provider.Provider] = providerToStored(provider)
-	}
-
-	return fileSettings{
-		Version:      1,
-		UserTimezone: defaultTimezone(),
-		Providers:    providers,
-	}
+	return s.Load()
 }
 
 func defaultProviders() []ProviderConfig {
@@ -217,14 +168,19 @@ func defaultProviders() []ProviderConfig {
 		{
 			Provider:      "oura",
 			RedirectURI:   "http://localhost:18080/oauth/oura/callback",
-			DefaultScopes: "email personal daily heartrate tag workout session spo2",
+			DefaultScopes: "",
 			Notes:         "Bring your own Oura developer app credentials. Secrets stay local on this device.",
 		},
 	}
 }
 
-func providerToStored(provider ProviderConfig) storedCreds {
-	return storedCreds{
+func findDefaultProvider(name string) (ProviderConfig, bool) {
+	return findProvider(defaultProviders(), name)
+}
+
+func providerToCredential(provider ProviderConfig) appstore.ProviderCredential {
+	return appstore.ProviderCredential{
+		Provider:      provider.Provider,
 		ClientID:      provider.ClientID,
 		ClientSecret:  provider.ClientSecret,
 		RedirectURI:   provider.RedirectURI,
@@ -233,11 +189,11 @@ func providerToStored(provider ProviderConfig) storedCreds {
 	}
 }
 
-func providerConfigured(stored storedCreds) bool {
+func providerConfigured(stored appstore.ProviderCredential) bool {
 	return stored.ClientID != "" && stored.ClientSecret != "" && stored.RedirectURI != ""
 }
 
-func normalizeStored(provider string, stored storedCreds) storedCreds {
+func normalizeCredential(provider string, stored appstore.ProviderCredential) appstore.ProviderCredential {
 	for _, defaults := range defaultProviders() {
 		if defaults.Provider != provider {
 			continue
@@ -247,6 +203,9 @@ func normalizeStored(provider string, stored storedCreds) storedCreds {
 		}
 		if stored.RedirectURI == "" {
 			stored.RedirectURI = defaults.RedirectURI
+		}
+		if stored.DefaultScopes == legacyOuraDefaultScopes {
+			stored.DefaultScopes = defaults.DefaultScopes
 		}
 		if stored.DefaultScopes == "" {
 			stored.DefaultScopes = defaults.DefaultScopes

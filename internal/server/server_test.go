@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/robince/somascope/internal/config"
 	"github.com/robince/somascope/internal/oura"
@@ -105,7 +106,7 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 				"client_id":"",
 				"client_secret":"",
 				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
-				"default_scopes":"email personal daily heartrate tag workout session spo2",
+				"default_scopes":"",
 				"notes":"Oura notes"
 			}
 		]
@@ -127,7 +128,7 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 				"client_id":"",
 				"client_secret":"",
 				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
-				"default_scopes":"email personal daily heartrate tag workout session spo2",
+				"default_scopes":"",
 				"notes":"Oura notes"
 			}
 		]
@@ -194,7 +195,7 @@ func TestOuraAuthStartReturnsAuthorizeURL(t *testing.T) {
 				"client_id":"oura-client",
 				"client_secret":"oura-secret",
 				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
-				"default_scopes":"email personal daily",
+				"default_scopes":"",
 				"notes":"Oura notes"
 			}
 		]
@@ -225,6 +226,9 @@ func TestOuraAuthStartReturnsAuthorizeURL(t *testing.T) {
 	if got := parsed.Query().Get("client_id"); got != "oura-client" {
 		t.Fatalf("expected client_id in authorize URL, got %q", got)
 	}
+	if got := parsed.Query().Get("scope"); got != "" {
+		t.Fatalf("expected authorize URL to omit scope and request all available scopes, got %q", got)
+	}
 }
 
 func TestOuraSyncPersistsRows(t *testing.T) {
@@ -232,12 +236,16 @@ func TestOuraSyncPersistsRows(t *testing.T) {
 	srv.oura = oura.NewClient(&http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch {
+			case req.URL.Path == "/v2/usercollection/personal_info":
+				return jsonResponse(http.StatusOK, `{"id":"person-1","email":"test@example.com"}`), nil
 			case req.URL.Path == "/v2/usercollection/daily_activity":
 				return jsonResponse(http.StatusOK, `{"data":[{"id":"activity-1","day":"2026-03-20","timestamp":"2026-03-20T23:59:59+00:00","steps":12345,"active_calories":450,"contributors":{"meet_daily_targets":90}}]}`), nil
 			case req.URL.Path == "/v2/usercollection/daily_readiness":
 				return jsonResponse(http.StatusOK, `{"data":[{"id":"readiness-1","day":"2026-03-20","timestamp":"2026-03-20T07:00:00+00:00","score":82,"temperature_deviation":0.1}]}`), nil
 			case req.URL.Path == "/v2/usercollection/sleep":
 				return jsonResponse(http.StatusOK, `{"data":[{"id":"sleep-1","day":"2026-03-20","bedtime_start":"2026-03-19T23:00:00+00:00","bedtime_end":"2026-03-20T07:00:00+00:00","time_in_bed":28800,"total_sleep_duration":27000,"efficiency":88,"type":"long_sleep","deep_sleep_duration":5400,"light_sleep_duration":14400,"rem_sleep_duration":7200,"awake_time":1800,"average_heart_rate":55}]}`), nil
+			case strings.HasPrefix(req.URL.Path, "/v2/usercollection/"):
+				return jsonResponse(http.StatusOK, `{"data":[]}`), nil
 			default:
 				return jsonResponse(http.StatusNotFound, `{"error":"not found"}`), nil
 			}
@@ -260,7 +268,7 @@ func TestOuraSyncPersistsRows(t *testing.T) {
 				"client_id":"oura-client",
 				"client_secret":"oura-secret",
 				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
-				"default_scopes":"email personal daily",
+				"default_scopes":"",
 				"notes":"Oura notes"
 			}
 		]
@@ -280,27 +288,26 @@ func TestOuraSyncPersistsRows(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	var payload struct {
-		Sync struct {
-			Mode     string `json:"mode"`
-			Entities []struct {
-				Entity string `json:"entity"`
-				Cursor string `json:"cursor"`
-			} `json:"entities"`
-		} `json:"sync"`
+		Run struct {
+			Status string `json:"status"`
+			Mode   string `json:"mode"`
+		} `json:"run"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal sync response: %v", err)
 	}
-	if payload.Sync.Mode != "backfill" {
-		t.Fatalf("expected backfill mode, got %q", payload.Sync.Mode)
+	if payload.Run.Mode != "backfill" {
+		t.Fatalf("expected backfill mode, got %q", payload.Run.Mode)
 	}
-	if len(payload.Sync.Entities) != 3 {
-		t.Fatalf("expected 3 entity summaries, got %d", len(payload.Sync.Entities))
+
+	statusPayload := waitForOuraRunTerminal(t, srv)
+	if statusPayload.LastCompletedRun.Status != "succeeded" {
+		t.Fatalf("expected finished run status succeeded, got %q", statusPayload.LastCompletedRun.Status)
 	}
 
 	rows, err := srv.store.CanonicalExportRows(context.Background())
@@ -328,28 +335,29 @@ func TestOuraSyncPersistsRows(t *testing.T) {
 		t.Fatalf("expected status 200 from status endpoint, got %d body=%s", statusRec.Code, statusRec.Body.String())
 	}
 
-	var statusPayload struct {
+	var statusSummary struct {
 		SyncState []struct {
 			EntityKind  string `json:"entity_kind"`
 			CursorValue string `json:"cursor_value"`
 		} `json:"sync_state"`
-		LastSync struct {
-			Mode      string `json:"mode"`
-			StartDate string `json:"start_date"`
-			EndDate   string `json:"end_date"`
-		} `json:"last_sync"`
+		LastCompletedRun struct {
+			Status             string `json:"status"`
+			Mode               string `json:"mode"`
+			EffectiveStartDate string `json:"effective_start_date"`
+			EffectiveEndDate   string `json:"effective_end_date"`
+		} `json:"last_completed_run"`
 	}
-	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusPayload); err != nil {
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusSummary); err != nil {
 		t.Fatalf("unmarshal status payload: %v", err)
 	}
-	if len(statusPayload.SyncState) != 3 {
-		t.Fatalf("expected 3 sync_state entries, got %d", len(statusPayload.SyncState))
+	if len(statusSummary.SyncState) < 3 {
+		t.Fatalf("expected at least 3 sync_state entries, got %d", len(statusSummary.SyncState))
 	}
-	if statusPayload.LastSync.Mode != "backfill" {
-		t.Fatalf("expected persisted last_sync mode backfill, got %q", statusPayload.LastSync.Mode)
+	if statusSummary.LastCompletedRun.Mode != "backfill" {
+		t.Fatalf("expected persisted run mode backfill, got %q", statusSummary.LastCompletedRun.Mode)
 	}
-	if statusPayload.LastSync.EndDate != "2026-03-20" {
-		t.Fatalf("expected persisted last_sync end_date 2026-03-20, got %q", statusPayload.LastSync.EndDate)
+	if statusSummary.LastCompletedRun.EffectiveEndDate != "2026-03-20" {
+		t.Fatalf("expected persisted run end_date 2026-03-20, got %q", statusSummary.LastCompletedRun.EffectiveEndDate)
 	}
 }
 
@@ -358,9 +366,18 @@ func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {
 	requests := map[string][]string{}
 	srv.oura = oura.NewClient(&http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			rangeKey := req.URL.Query().Get("start_date") + ".." + req.URL.Query().Get("end_date")
-			requests[req.URL.Path] = append(requests[req.URL.Path], rangeKey)
-			return jsonResponse(http.StatusOK, `{"data":[]}`), nil
+			switch req.URL.Path {
+			case "/v2/usercollection/personal_info":
+				requests[req.URL.Path] = append(requests[req.URL.Path], "singleton")
+				return jsonResponse(http.StatusOK, `{"id":"person-1"}`), nil
+			default:
+				rangeKey := req.URL.Query().Get("start_date") + ".." + req.URL.Query().Get("end_date")
+				if req.URL.Query().Get("start_datetime") != "" || req.URL.Query().Get("end_datetime") != "" {
+					rangeKey = req.URL.Query().Get("start_datetime") + ".." + req.URL.Query().Get("end_datetime")
+				}
+				requests[req.URL.Path] = append(requests[req.URL.Path], rangeKey)
+				return jsonResponse(http.StatusOK, `{"data":[]}`), nil
+			}
 		}),
 	})
 
@@ -380,7 +397,7 @@ func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {
 				"client_id":"oura-client",
 				"client_secret":"oura-secret",
 				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
-				"default_scopes":"email personal daily",
+				"default_scopes":"",
 				"notes":"Oura notes"
 			}
 		]
@@ -405,9 +422,11 @@ func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body=%s", rec.Code, rec.Body.String())
 	}
+
+	waitForOuraRunTerminal(t, srv)
 
 	for _, path := range []string{
 		"/v2/usercollection/daily_activity",
@@ -421,6 +440,93 @@ func TestOuraSyncUsesCursorOverlapWhenStartDateOmitted(t *testing.T) {
 		if ranges[0] != "2026-03-17..2026-03-24" {
 			t.Fatalf("expected overlap range for %s, got %q", path, ranges[0])
 		}
+	}
+}
+
+func TestOuraSyncFetchesExpandedRawEndpoints(t *testing.T) {
+	srv := newTestServer(t)
+	requested := map[string]int{}
+	srv.oura = oura.NewClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requested[req.URL.Path]++
+			switch req.URL.Path {
+			case "/v2/usercollection/personal_info":
+				return jsonResponse(http.StatusOK, `{"id":"person-1","email":"test@example.com"}`), nil
+			case "/v2/usercollection/daily_stress":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"stress-1","day":"2026-03-20","stress_high":120}]}`), nil
+			case "/v2/usercollection/heartrate":
+				return jsonResponse(http.StatusOK, `{"data":[{"timestamp":"2026-03-20T00:05:00+00:00","bpm":55,"source":"rest"}]}`), nil
+			default:
+				return jsonResponse(http.StatusOK, `{"data":[]}`), nil
+			}
+		}),
+	})
+
+	saveJSON(t, srv, `{
+		"user_timezone":"Europe/London",
+		"providers":[
+			{
+				"provider":"fitbit",
+				"client_id":"",
+				"client_secret":"",
+				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
+				"default_scopes":"activity heartrate sleep profile",
+				"notes":"Fitbit notes"
+			},
+			{
+				"provider":"oura",
+				"client_id":"oura-client",
+				"client_secret":"oura-secret",
+				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
+				"default_scopes":"",
+				"notes":"Oura notes"
+			}
+		]
+	}`)
+
+	if err := srv.store.UpsertConnection(context.Background(), store.Connection{
+		Provider:    "oura",
+		AccessToken: "oura-access",
+		Status:      "connected",
+		ConnectedAt: "2026-03-20T08:00:00Z",
+	}); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/providers/oura/sync", strings.NewReader(`{"start_date":"2026-03-20","end_date":"2026-03-20"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	waitForOuraRunTerminal(t, srv)
+
+	for _, path := range []string{
+		"/v2/usercollection/personal_info",
+		"/v2/usercollection/daily_stress",
+		"/v2/usercollection/heartrate",
+		"/v2/usercollection/daily_activity",
+		"/v2/usercollection/daily_readiness",
+		"/v2/usercollection/sleep",
+	} {
+		if requested[path] == 0 {
+			t.Fatalf("expected %s to be fetched at least once", path)
+		}
+	}
+
+	var rawCount int
+	if err := srv.store.DB().QueryRowContext(context.Background(), `
+		SELECT COUNT(*)
+		FROM raw_documents
+		WHERE provider = 'oura' AND document_kind IN ('personal_info', 'daily_stress', 'heartrate')
+	`).Scan(&rawCount); err != nil {
+		t.Fatalf("count raw docs: %v", err)
+	}
+	if rawCount < 3 {
+		t.Fatalf("expected raw docs for expanded endpoints, got %d", rawCount)
 	}
 }
 
@@ -693,7 +799,6 @@ func newTestServer(t *testing.T) *Server {
 		Port:       18080,
 		DataDir:    tempDir,
 		DBPath:     tempDir + "/somascope.db",
-		ConfigPath: tempDir + "/config.json",
 		ExportsDir: tempDir + "/exports",
 		RawDir:     tempDir + "/raw",
 		LogsDir:    tempDir + "/logs",
@@ -744,4 +849,57 @@ func jsonResponse(status int, body string) *http.Response {
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
+}
+
+func waitForOuraRunTerminal(t *testing.T, srv *Server) struct {
+	CurrentRun *struct {
+		Status string `json:"status"`
+	} `json:"current_run"`
+	LastCompletedRun struct {
+		Status string `json:"status"`
+		Mode   string `json:"mode"`
+	} `json:"last_completed_run"`
+	LastError *store.SyncError `json:"last_error"`
+} {
+	t.Helper()
+
+	for attempt := 0; attempt < 200; attempt++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/providers/oura/status", nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200 while polling, got %d body=%s", rec.Code, rec.Body.String())
+		}
+
+		var payload struct {
+			CurrentRun *struct {
+				Status string `json:"status"`
+			} `json:"current_run"`
+			LastCompletedRun struct {
+				Status string `json:"status"`
+				Mode   string `json:"mode"`
+			} `json:"last_completed_run"`
+			LastError *store.SyncError `json:"last_error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("unmarshal polled status: %v", err)
+		}
+
+		if payload.CurrentRun == nil {
+			return payload
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for Oura sync to finish")
+	return struct {
+		CurrentRun *struct {
+			Status string `json:"status"`
+		} `json:"current_run"`
+		LastCompletedRun struct {
+			Status string `json:"status"`
+			Mode   string `json:"mode"`
+		} `json:"last_completed_run"`
+		LastError *store.SyncError `json:"last_error"`
+	}{}
 }

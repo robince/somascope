@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import DashboardView from "./lib/DashboardView.svelte";
   import SettingsView from "./lib/SettingsView.svelte";
   import { addDays, PERIODS, clampDate, getPeriod, isEditableTarget } from "./lib/time";
@@ -15,8 +15,6 @@
     SettingsPayload
   } from "./lib/types";
 
-  const OURA_ALL_TIME_START = "2010-01-01";
-
   const PROVIDER_DEFAULTS: Record<ProviderSettings["provider"], Omit<ProviderSettings, "configured" | "client_secret">> = {
     fitbit: {
       provider: "fitbit",
@@ -29,7 +27,7 @@
       provider: "oura",
       client_id: "",
       redirect_uri: "http://localhost:18080/oauth/oura/callback",
-      default_scopes: "email personal daily heartrate tag workout session spo2",
+      default_scopes: "",
       notes: "Use your own Oura app credentials in v1; shared brokered mode comes later."
     }
   };
@@ -51,6 +49,7 @@
   let error = "";
   let success = "";
   let syncStartDate = "";
+  let ouraStatusPollTimer: ReturnType<typeof window.setInterval> | null = null;
 
   function baseProvider(provider: ProviderSettings["provider"]): ProviderSettings {
     const defaults = PROVIDER_DEFAULTS[provider];
@@ -93,6 +92,73 @@
     activeView = window.location.pathname === "/settings" || window.location.hash === "#settings" ? "settings" : "dashboard";
   }
 
+  function syncBusyFromStatus(status: OuraStatus | null) {
+    return status?.current_run?.status === "running";
+  }
+
+  function stopOuraStatusPolling() {
+    if (ouraStatusPollTimer !== null) {
+      window.clearInterval(ouraStatusPollTimer);
+      ouraStatusPollTimer = null;
+    }
+  }
+
+  function startOuraStatusPolling() {
+    if (typeof window === "undefined" || ouraStatusPollTimer !== null) {
+      return;
+    }
+    ouraStatusPollTimer = window.setInterval(() => {
+      void refreshOuraStatus();
+    }, 2000);
+  }
+
+  function applyOuraStatus(status: OuraStatus) {
+    const wasBusy = ouraBusy;
+    ouraStatus = status;
+    ouraBusy = syncBusyFromStatus(status);
+    if (ouraBusy) {
+      startOuraStatusPolling();
+    } else {
+      stopOuraStatusPolling();
+      if (wasBusy) {
+        void refreshPostRunData();
+      }
+    }
+  }
+
+  async function refreshOuraStatus() {
+    try {
+      const response = await fetch("/api/v1/providers/oura/status");
+      if (!response.ok) {
+        throw new Error("Failed to refresh Oura sync status.");
+      }
+      const payload: OuraStatus = await response.json();
+      applyOuraStatus(payload);
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      stopOuraStatusPolling();
+    }
+  }
+
+  async function refreshPostRunData() {
+    try {
+      const [dashboardRes, recentRes, statusRes] = await Promise.all([
+        fetch("/api/v1/dashboard/overview"),
+        fetch("/api/v1/providers/oura/recent"),
+        fetch("/api/v1/providers/oura/status")
+      ]);
+      if (!dashboardRes.ok || !recentRes.ok || !statusRes.ok) {
+        throw new Error("Failed to refresh Oura data after sync.");
+      }
+      dashboard = await dashboardRes.json();
+      ouraRecent = await recentRes.json();
+      applyOuraStatus(await statusRes.json());
+      windowEndDate = clampDate(windowEndDate || dashboard?.latest_date || "", dashboard?.earliest_date, dashboard?.latest_date);
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   async function load() {
     loading = true;
     error = "";
@@ -116,11 +182,12 @@
       const exportPayload = await exportRes.json();
       const settingsPayload: SettingsPayload = await settingsRes.json();
       const dashboardPayload: DashboardOverview = await dashboardRes.json();
-      ouraStatus = await ouraStatusRes.json();
+      const ouraStatusPayload: OuraStatus = await ouraStatusRes.json();
       ouraRecent = await ouraRecentRes.json();
 
       formats = exportPayload.items ?? [];
       dashboard = dashboardPayload;
+      applyOuraStatus(ouraStatusPayload);
       userTimezone = settingsPayload.user_timezone || userTimezone;
       providers = normalizeProviders(settingsPayload.providers);
       dirty = false;
@@ -137,11 +204,11 @@
   }
 
   async function setActiveView(view: AppView, anchor = "") {
-    activeView = view;
     if (typeof window !== "undefined") {
       const nextPath = view === "settings" ? "/settings" : "/";
       const nextUrl = anchor ? `${nextPath}#${anchor}` : nextPath;
       window.history.pushState({}, "", nextUrl);
+      syncViewFromLocation();
       if (anchor) {
         await tick();
         document.getElementById(anchor)?.scrollIntoView({
@@ -149,7 +216,9 @@
           block: "start"
         });
       }
+      return;
     }
+    activeView = view;
   }
 
   function updateProvider(index: number, field: keyof ProviderSettings, value: string | boolean) {
@@ -238,7 +307,6 @@
   }
 
   async function syncOura(options?: { startDate?: string; modeLabel?: string }) {
-    ouraBusy = true;
     error = "";
     success = "";
 
@@ -254,31 +322,52 @@
         },
         body: JSON.stringify(body)
       });
+      const payload = await response.json().catch(() => null);
+      if (response.status === 409) {
+        if (payload?.current_run) {
+          applyOuraStatus({
+            ...(ouraStatus ?? {
+              provider: "oura",
+              configured: true,
+              connected: true,
+              status: "connected",
+              daily_record_count: 0,
+              sleep_session_count: 0
+            }),
+            current_run: payload.current_run
+          });
+        }
+        success = "Oura sync is already running in the local app.";
+        return;
+      }
       if (!response.ok) {
-        const payload = await response.json().catch(() => null);
         throw new Error(payload?.error || "Failed to sync Oura data.");
       }
-      const payload = await response.json();
-      ouraStatus = payload.overview ?? ouraStatus;
-      const modeLabel = options?.modeLabel ?? (payload.sync.mode === "backfill" ? "Backfill" : "Update");
-      success = `${modeLabel} complete: ${payload.sync.daily_activity_rows} activity, ${payload.sync.daily_readiness_rows} readiness, ${payload.sync.sleep_rows} sleep rows from ${payload.range.start_date} to ${payload.range.end_date}.`;
-      await load();
+      if (payload?.run) {
+        applyOuraStatus({
+          ...(ouraStatus ?? {
+            provider: "oura",
+            configured: true,
+            connected: true,
+            status: "connected",
+            daily_record_count: 0,
+            sleep_session_count: 0
+          }),
+          current_run: payload.run
+        });
+      } else {
+        ouraBusy = true;
+        startOuraStatusPolling();
+      }
+      const modeLabel = options?.modeLabel ?? (payload?.run?.mode === "backfill" ? "Backfill" : "Update");
+      success = `${modeLabel} started. The local app will keep syncing even if you refresh this page.`;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
-    } finally {
-      ouraBusy = false;
     }
   }
 
   async function syncOuraIncremental() {
     await syncOura({ modeLabel: "Update" });
-  }
-
-  async function syncOuraAllTime() {
-    await syncOura({
-      startDate: OURA_ALL_TIME_START,
-      modeLabel: "All-time backfill"
-    });
   }
 
   async function syncOuraFromDate() {
@@ -350,6 +439,10 @@
     syncViewFromLocation();
     void load();
   });
+
+  onDestroy(() => {
+    stopOuraStatusPolling();
+  });
 </script>
 
 <svelte:head>
@@ -407,7 +500,6 @@
       onConnectOura={() => void connectOura()}
       onSyncOura={() => void syncOuraIncremental()}
       onSyncOuraFromDate={() => void syncOuraFromDate()}
-      onSyncOuraAllTime={() => void syncOuraAllTime()}
       onSyncStartDateInput={(value: string) => {
         syncStartDate = value;
         error = "";

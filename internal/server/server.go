@@ -13,6 +13,7 @@ import (
 
 	"github.com/robince/somascope/internal/config"
 	"github.com/robince/somascope/internal/oura"
+	"github.com/robince/somascope/internal/providersync"
 	"github.com/robince/somascope/internal/settings"
 	"github.com/robince/somascope/internal/store"
 	"github.com/robince/somascope/internal/web"
@@ -32,6 +33,7 @@ type Server struct {
 	settings   *settings.Store
 	store      *store.Store
 	oura       *oura.Client
+	syncs      *providersync.Manager
 	mux        *http.ServeMux
 }
 
@@ -46,11 +48,16 @@ func New(cfg config.Config, appStore *store.Store, version VersionInfo) (*Server
 		version:    version,
 		spaFS:      dist,
 		spaHandler: http.FileServerFS(dist),
-		settings:   settings.NewStore(cfg.ConfigPath),
+		settings:   settings.NewStore(appStore),
 		store:      appStore,
 		oura:       oura.NewClient(nil),
 		mux:        http.NewServeMux(),
 	}
+	syncs, err := providersync.NewManager(appStore)
+	if err != nil {
+		return nil, err
+	}
+	s.syncs = syncs
 	s.routes()
 	return s, nil
 }

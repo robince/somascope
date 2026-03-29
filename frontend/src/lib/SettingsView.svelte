@@ -20,7 +20,6 @@
   export let onConnectOura: () => void = () => {};
   export let onSyncOura: () => void = () => {};
   export let onSyncOuraFromDate: () => void = () => {};
-  export let onSyncOuraAllTime: () => void = () => {};
   export let onSyncStartDateInput: (value: string) => void = () => {};
   export let onTimezoneInput: (value: string) => void = () => {};
   export let onProviderInput: (index: number, field: keyof ProviderSettings, value: string | boolean) => void = () => {};
@@ -53,6 +52,10 @@
     } catch {
       return value;
     }
+  }
+
+  function entityLabel(value: string | undefined): string {
+    return value ? value.replaceAll("_", " ") : "--";
   }
 </script>
 
@@ -102,8 +105,8 @@
           <dd>{ouraStatus?.last_sync_at ?? "Not synced yet"}</dd>
         </div>
         <div class="stack-row">
-          <dt>Last mode</dt>
-          <dd>{ouraStatus?.last_sync?.mode ?? "None yet"}</dd>
+          <dt>Run state</dt>
+          <dd>{ouraStatus?.current_run?.status ?? ouraStatus?.last_completed_run?.status ?? "Idle"}</dd>
         </div>
       </dl>
     </aside>
@@ -119,13 +122,14 @@
 
     <p class="helper">
       The main update action already handles incremental sync from the last stored cursor with a 3 day overlap.
-      This section is for larger history loads: either from a date you choose or across the account’s full history.
+      This section is for larger history loads from a date you choose.
+      Once a sync starts, it keeps running in the local app even if you refresh this page.
     </p>
 
     <div class="sync-grid">
       <article class="sync-card">
         <strong>Backfill from date</strong>
-        <p class="sync-copy">Pull older history from a specific day up to the present.</p>
+        <p class="sync-copy">Pull older history from a specific day up to the present. Pick the earliest date you actually want to fetch.</p>
         <label class="field">
           <span class="field-label">Start date</span>
           <input
@@ -140,39 +144,84 @@
           onclick={onSyncOuraFromDate}
           disabled={loading || saving || ouraBusy || !ouraStatus?.connected}
         >
-          {ouraBusy ? "Working..." : "Backfill from date"}
-        </button>
-      </article>
-
-      <article class="sync-card">
-        <strong>All time</strong>
-        <p class="sync-copy">Use this once if you want the app to pull the account’s full history.</p>
-        <button
-          class="button button-ghost"
-          type="button"
-          onclick={onSyncOuraAllTime}
-          disabled={loading || saving || ouraBusy || !ouraStatus?.connected}
-        >
-          {ouraBusy ? "Working..." : "Backfill all time"}
+          {ouraBusy ? "Running..." : "Backfill from date"}
         </button>
       </article>
     </div>
 
-    {#if ouraStatus?.last_sync}
+    {#if ouraStatus?.current_run}
       <div class="sync-meta">
-        <p class="eyebrow">Last run</p>
+        <p class="eyebrow">Current run</p>
         <div class="sync-meta-grid">
           <article class="sync-meta-card">
-            <strong>Range</strong>
-            <span>{ouraStatus.last_sync.start_date} to {ouraStatus.last_sync.end_date}</span>
+            <strong>Status</strong>
+            <span>{ouraStatus.current_run.status}</span>
           </article>
           <article class="sync-meta-card">
             <strong>Rows</strong>
-            <span>{ouraStatus.last_sync.daily_activity_rows + ouraStatus.last_sync.daily_readiness_rows + ouraStatus.last_sync.sleep_rows}</span>
+            <span>{ouraStatus.current_run.rows_written}</span>
           </article>
           <article class="sync-meta-card">
-            <strong>Fetched</strong>
-            <span>{ouraStatus.last_sync.fetched_at}</span>
+            <strong>Updated</strong>
+            <span>{ouraStatus.current_run.updated_at}</span>
+          </article>
+          <article class="sync-meta-card">
+            <strong>Chunk</strong>
+            <span>{entityLabel(ouraStatus.current_run.current_entity_kind)} {ouraStatus.current_run.current_chunk_start_date} {ouraStatus.current_run.current_chunk_end_date ? `to ${ouraStatus.current_run.current_chunk_end_date}` : ""}</span>
+          </article>
+          <article class="sync-meta-card">
+            <strong>Retries</strong>
+            <span>{ouraStatus.current_run.retry_count}</span>
+          </article>
+        </div>
+
+        {#if ouraStatus.current_run.entities?.length}
+          <div class="cursor-list">
+            {#each ouraStatus.current_run.entities as entity}
+              <div class="cursor-row">
+                <span>{entityLabel(entity.entity_kind)} ({entity.status})</span>
+                <span>
+                  {entity.rows_written} rows
+                  {#if entity.total_chunks > 0}
+                    , {entity.completed_chunks}/{entity.total_chunks} chunks
+                  {/if}
+                </span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    {#if ouraStatus?.last_error}
+      <p class="status-copy error">
+        {entityLabel(ouraStatus.last_error.entity_kind)} failed
+        {#if ouraStatus.last_error.chunk_start_date}
+          on {ouraStatus.last_error.chunk_start_date}{#if ouraStatus.last_error.chunk_end_date} to {ouraStatus.last_error.chunk_end_date}{/if}
+        {/if}
+        : {ouraStatus.last_error.message}
+      </p>
+    {/if}
+
+    {#if ouraStatus?.last_completed_run}
+      <div class="sync-meta">
+        <p class="eyebrow">Last finished run</p>
+        <div class="sync-meta-grid">
+          <article class="sync-meta-card">
+            <strong>Status</strong>
+            <span>{ouraStatus.last_completed_run.status}</span>
+          </article>
+          <article class="sync-meta-card">
+            <strong>Range</strong>
+            <span>{ouraStatus.last_completed_run.effective_start_date ?? "--"} to {ouraStatus.last_completed_run.effective_end_date ?? "--"}</span>
+          </article>
+          <article class="sync-meta-card">
+            <strong>Rows</strong>
+            <span>{ouraStatus.last_completed_run.rows_written}</span>
+          </article>
+          <article class="sync-meta-card">
+            <strong>Finished</strong>
+            <span>{ouraStatus.last_completed_run.finished_at ?? ouraStatus.last_completed_run.updated_at}</span>
           </article>
         </div>
 

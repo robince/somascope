@@ -52,10 +52,14 @@ export type OuraStatus = {
   connected_at?: string;
   token_expires_at?: string;
   last_sync_at?: string;
+  last_success_at?: string;
+  last_activity_at?: string;
   daily_record_count: number;
   sleep_session_count: number;
   sync_state?: SyncStateEntry[];
-  last_sync?: OuraLastSync | null;
+  current_run?: ProviderSyncRun | null;
+  last_completed_run?: ProviderSyncRun | null;
+  last_error?: SyncRunError | null;
 };
 
 export type SyncStateEntry = {
@@ -65,24 +69,57 @@ export type SyncStateEntry = {
   synced_at?: string;
 };
 
-export type OuraLastSyncEntity = {
-  entity: string;
-  start_date: string;
-  end_date: string;
-  cursor: string;
-  rows: number;
-  chunk_count: number;
+export type SyncRunError = {
+  at?: string;
+  entity_kind?: string;
+  chunk_start_date?: string;
+  chunk_end_date?: string;
+  operation?: string;
+  endpoint?: string;
+  http_status?: number;
+  attempt?: number;
+  retriable?: boolean;
+  message?: string;
+  response_body?: string;
 };
 
-export type OuraLastSync = {
-  fetched_at: string;
+export type ProviderSyncRunEntity = {
+  run_id?: string;
+  entity_kind: string;
+  status: string;
+  start_date?: string;
+  end_date?: string;
+  cursor_value?: string;
+  rows_written: number;
+  completed_chunks: number;
+  total_chunks: number;
+  current_chunk_start_date?: string;
+  current_chunk_end_date?: string;
+  last_chunk_completed_at?: string;
+  last_error?: SyncRunError | null;
+};
+
+export type ProviderSyncRun = {
+  id: string;
+  provider: string;
+  status: string;
   mode: string;
-  start_date: string;
-  end_date: string;
-  daily_activity_rows: number;
-  daily_readiness_rows: number;
-  sleep_rows: number;
-  entities: OuraLastSyncEntity[];
+  requested_start_date?: string;
+  requested_end_date?: string;
+  effective_start_date?: string;
+  effective_end_date?: string;
+  started_at: string;
+  updated_at: string;
+  finished_at?: string;
+  current_entity_kind?: string;
+  current_chunk_start_date?: string;
+  current_chunk_end_date?: string;
+  rows_written: number;
+  completed_chunks: number;
+  total_chunks: number;
+  retry_count: number;
+  last_error?: SyncRunError | null;
+  entities: ProviderSyncRunEntity[];
 };
 
 export type DailyRecord = {

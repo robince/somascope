@@ -107,7 +107,6 @@ Default local data root:
 
 Reserved paths:
 
-- `config.json`
 - `somascope.db`
 - `exports/`
 - `raw/`

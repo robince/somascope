@@ -21,7 +21,6 @@ type Config struct {
 	Port       int
 	DataDir    string
 	DBPath     string
-	ConfigPath string
 	ExportsDir string
 	RawDir     string
 	LogsDir    string
@@ -42,7 +41,6 @@ func Load() (Config, error) {
 		Port:       *port,
 		DataDir:    *dataDir,
 		DBPath:     filepath.Join(*dataDir, "somascope.db"),
-		ConfigPath: filepath.Join(*dataDir, "config.json"),
 		ExportsDir: filepath.Join(*dataDir, "exports"),
 		RawDir:     filepath.Join(*dataDir, "raw"),
 		LogsDir:    filepath.Join(*dataDir, "logs"),

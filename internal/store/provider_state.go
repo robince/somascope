@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -31,6 +32,7 @@ type RawDocument struct {
 	ZoneOffset   string
 	Payload      json.RawMessage
 	FetchedAt    string
+	DocumentKey  string
 }
 
 type ProviderOverview struct {
@@ -44,6 +46,15 @@ type ProviderOverview struct {
 	LastSyncAt        string `json:"last_sync_at,omitempty"`
 	DailyRecordCount  int    `json:"daily_record_count"`
 	SleepSessionCount int    `json:"sleep_session_count"`
+}
+
+type ProviderCredential struct {
+	Provider      string
+	ClientID      string
+	ClientSecret  string
+	RedirectURI   string
+	DefaultScopes string
+	Notes         string
 }
 
 type SyncStateEntry struct {
@@ -70,6 +81,71 @@ func (s *Store) AppSetting(ctx context.Context, key string) (string, error) {
 		return "", ErrNotFound
 	}
 	return value, err
+}
+
+func (s *Store) UpsertProviderCredential(ctx context.Context, credential ProviderCredential) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO provider_credentials (
+			provider, client_id, client_secret, redirect_uri, default_scopes, notes
+		) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(provider) DO UPDATE SET
+			client_id = excluded.client_id,
+			client_secret = excluded.client_secret,
+			redirect_uri = excluded.redirect_uri,
+			default_scopes = excluded.default_scopes,
+			notes = excluded.notes,
+			updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+	`, credential.Provider, credential.ClientID, credential.ClientSecret, credential.RedirectURI, credential.DefaultScopes, credential.Notes)
+	return err
+}
+
+func (s *Store) ProviderCredentialByProvider(ctx context.Context, provider string) (ProviderCredential, error) {
+	var credential ProviderCredential
+	err := s.db.QueryRowContext(ctx, `
+		SELECT provider, client_id, client_secret, redirect_uri, default_scopes, notes
+		FROM provider_credentials
+		WHERE provider = ?
+	`, provider).Scan(
+		&credential.Provider,
+		&credential.ClientID,
+		&credential.ClientSecret,
+		&credential.RedirectURI,
+		&credential.DefaultScopes,
+		&credential.Notes,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProviderCredential{}, ErrNotFound
+	}
+	return credential, err
+}
+
+func (s *Store) ProviderCredentials(ctx context.Context) ([]ProviderCredential, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT provider, client_id, client_secret, redirect_uri, default_scopes, notes
+		FROM provider_credentials
+		ORDER BY provider ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ProviderCredential
+	for rows.Next() {
+		var credential ProviderCredential
+		if err := rows.Scan(
+			&credential.Provider,
+			&credential.ClientID,
+			&credential.ClientSecret,
+			&credential.RedirectURI,
+			&credential.DefaultScopes,
+			&credential.Notes,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, credential)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) UpsertConnection(ctx context.Context, connection Connection) error {
@@ -166,13 +242,37 @@ func (s *Store) SyncState(ctx context.Context, provider, entityKind string) (str
 func (s *Store) InsertRawDocument(ctx context.Context, doc RawDocument) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO raw_documents (
-			provider, document_kind, external_id, local_date, zone_offset, payload_json, fetched_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, doc.Provider, doc.DocumentKind, nullIfEmpty(doc.ExternalID), nullIfEmpty(doc.LocalDate), nullIfEmpty(doc.ZoneOffset), string(doc.Payload), doc.FetchedAt)
+			provider, document_kind, external_id, local_date, zone_offset, payload_json, fetched_at, document_key
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, doc.Provider, doc.DocumentKind, nullIfEmpty(doc.ExternalID), nullIfEmpty(doc.LocalDate), nullIfEmpty(doc.ZoneOffset), string(doc.Payload), doc.FetchedAt, doc.DocumentKey)
 	if err != nil {
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+func (s *Store) UpsertRawDocument(ctx context.Context, doc RawDocument) (int64, error) {
+	if strings.TrimSpace(doc.DocumentKey) == "" {
+		return s.InsertRawDocument(ctx, doc)
+	}
+
+	var id int64
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO raw_documents (
+			provider, document_kind, external_id, local_date, zone_offset, payload_json, fetched_at, document_key
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(provider, document_kind, document_key) DO UPDATE SET
+			external_id = excluded.external_id,
+			local_date = excluded.local_date,
+			zone_offset = excluded.zone_offset,
+			payload_json = excluded.payload_json,
+			fetched_at = excluded.fetched_at
+		RETURNING id
+	`, doc.Provider, doc.DocumentKind, nullIfEmpty(doc.ExternalID), nullIfEmpty(doc.LocalDate), nullIfEmpty(doc.ZoneOffset), string(doc.Payload), doc.FetchedAt, doc.DocumentKey).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *Store) SyncStatesByProvider(ctx context.Context, provider string) ([]SyncStateEntry, error) {

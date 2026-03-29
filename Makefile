@@ -1,15 +1,15 @@
 .DEFAULT_GOAL := help
 
-.PHONY: build dev fmt test frontend frontend-dev ensure-embed-dir help
+.PHONY: build dev fmt test frontend frontend-build frontend-dev ensure-embed-dir help
 
 ensure-embed-dir:
 	@mkdir -p internal/web/dist
 	@test -n "$$(ls internal/web/dist/ 2>/dev/null)" || printf '%s\n' '<!doctype html><html lang="en"><meta charset="utf-8"><title>somascope</title><body><p>Frontend assets are not built yet. Run the frontend build to embed the real UI.</p></body></html>' > internal/web/dist/stub.html
 
-build: ensure-embed-dir
+build: frontend
 	go build -o somascope ./cmd/somascope
 
-dev: ensure-embed-dir
+dev: frontend
 	go run ./cmd/somascope
 
 fmt:
@@ -18,7 +18,10 @@ fmt:
 test: ensure-embed-dir
 	go test ./...
 
-frontend:
+frontend-build:
+	pnpm --dir frontend build
+
+frontend: frontend-build ensure-embed-dir
 	rm -rf internal/web/dist
 	cp -r frontend/dist internal/web/dist
 
@@ -29,6 +32,7 @@ help:
 	@printf '%s\n' \
 		'build         Build the local binary' \
 		'dev           Run the local server' \
+		'frontend      Build the frontend and copy embedded assets' \
 		'fmt           Format Go sources' \
 		'test          Run Go tests' \
 		'frontend-dev  Note about the frontend scaffold'

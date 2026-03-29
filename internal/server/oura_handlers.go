@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/robince/somascope/internal/oura"
+	"github.com/robince/somascope/internal/providersync"
 	"github.com/robince/somascope/internal/store"
 )
 
 const (
 	ouraOAuthStateKey    = "oauth:oura:state"
 	ouraOAuthReturnToKey = "oauth:oura:return_to"
-	ouraLastSyncKey      = "oura:last_sync"
 )
 
 func (s *Server) handleOuraStatus(w http.ResponseWriter, _ *http.Request) {
@@ -42,12 +42,48 @@ func (s *Server) handleOuraStatus(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	var lastSync any
-	if value, err := s.store.AppSetting(context.Background(), ouraLastSyncKey); err == nil && strings.TrimSpace(value) != "" {
-		_ = json.Unmarshal([]byte(value), &lastSync)
+	var currentRun *store.SyncRun
+	if run, err := s.store.CurrentSyncRunByProvider(context.Background(), "oura"); err == nil {
+		currentRun = &run
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	var lastCompletedRun *store.SyncRun
+	if run, err := s.store.LatestFinishedSyncRunByProvider(context.Background(), "oura"); err == nil {
+		lastCompletedRun = &run
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	var lastSuccessfulRun *store.SyncRun
+	if run, err := s.store.LatestSuccessfulSyncRunByProvider(context.Background(), "oura"); err == nil {
+		lastSuccessfulRun = &run
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	lastSuccessAt := overview.LastSyncAt
+	if lastSuccessfulRun != nil && strings.TrimSpace(lastSuccessfulRun.FinishedAt) != "" {
+		lastSuccessAt = lastSuccessfulRun.FinishedAt
+	}
+
+	lastActivityAt := lastSuccessAt
+	if currentRun != nil && strings.TrimSpace(currentRun.UpdatedAt) != "" {
+		lastActivityAt = currentRun.UpdatedAt
+	} else if lastCompletedRun != nil && strings.TrimSpace(lastCompletedRun.UpdatedAt) != "" {
+		lastActivityAt = lastCompletedRun.UpdatedAt
+	}
+
+	var lastError *store.SyncError
+	switch {
+	case currentRun != nil && currentRun.LastError != nil:
+		lastError = currentRun.LastError
+	case lastCompletedRun != nil && lastCompletedRun.LastError != nil:
+		lastError = lastCompletedRun.LastError
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -58,11 +94,15 @@ func (s *Server) handleOuraStatus(w http.ResponseWriter, _ *http.Request) {
 		"scope":               overview.Scope,
 		"connected_at":        overview.ConnectedAt,
 		"token_expires_at":    overview.TokenExpiresAt,
-		"last_sync_at":        overview.LastSyncAt,
+		"last_sync_at":        lastSuccessAt,
+		"last_success_at":     lastSuccessAt,
+		"last_activity_at":    lastActivityAt,
 		"daily_record_count":  overview.DailyRecordCount,
 		"sleep_session_count": overview.SleepSessionCount,
 		"sync_state":          syncStates,
-		"last_sync":           lastSync,
+		"current_run":         currentRun,
+		"last_completed_run":  lastCompletedRun,
+		"last_error":          lastError,
 	})
 }
 
@@ -231,17 +271,32 @@ func (s *Server) handleOuraSync(w http.ResponseWriter, r *http.Request) {
 
 	endDate := strings.TrimSpace(request.EndDate)
 	startDate := strings.TrimSpace(request.StartDate)
-	result, activeConnection, err := oura.Sync(r.Context(), s.store, s.oura, oura.AppConfig{
-		ClientID:      provider.ClientID,
-		ClientSecret:  provider.ClientSecret,
-		RedirectURI:   provider.RedirectURI,
-		DefaultScopes: provider.DefaultScopes,
-	}, connection, oura.SyncOptions{
-		StartDate: startDate,
-		EndDate:   endDate,
+	mode := "incremental"
+	if startDate != "" {
+		mode = "backfill"
+	}
+
+	run, alreadyRunning, err := s.syncs.Start("oura", mode, startDate, endDate, func(ctx context.Context, tracker *providersync.Tracker) error {
+		return oura.Sync(ctx, s.store, s.oura, oura.AppConfig{
+			ClientID:      provider.ClientID,
+			ClientSecret:  provider.ClientSecret,
+			RedirectURI:   provider.RedirectURI,
+			DefaultScopes: provider.DefaultScopes,
+		}, connection, oura.SyncOptions{
+			StartDate: startDate,
+			EndDate:   endDate,
+			Tracker:   tracker,
+		})
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if alreadyRunning {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":       "Oura sync is already running.",
+			"current_run": run,
+		})
 		return
 	}
 
@@ -251,16 +306,11 @@ func (s *Server) handleOuraSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if data, err := json.Marshal(result); err == nil {
-		_ = s.store.SetAppSetting(r.Context(), ouraLastSyncKey, string(data))
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":         true,
-		"range":      map[string]string{"start_date": result.StartDate, "end_date": result.EndDate},
-		"sync":       result,
-		"connection": map[string]any{"status": activeConnection.Status, "scope": activeConnection.Scope, "token_expires_at": activeConnection.TokenExpiresAt},
-		"overview":   overview,
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":       true,
+		"started":  true,
+		"run":      run,
+		"overview": overview,
 	})
 }
 

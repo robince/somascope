@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/robince/somascope/internal/config"
 	"github.com/robince/somascope/internal/server"
@@ -26,6 +29,7 @@ func main() {
 	if err := cfg.EnsureLayout(); err != nil {
 		log.Fatal(err)
 	}
+	configureLogging(cfg.LogsDir)
 
 	db, err := store.Open(context.Background(), cfg.DBPath)
 	if err != nil {
@@ -50,4 +54,14 @@ func main() {
 	if err := http.ListenAndServe(addr, srv.Handler()); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func configureLogging(logsDir string) {
+	logPath := filepath.Join(logsDir, "somascope.log")
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("warning: failed opening log file %s: %v", logPath, err)
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stdout, file))
 }

@@ -32,7 +32,6 @@ V1 keeps a single local data root under `~/.somascope/`.
 
 Reserved paths:
 
-- `config.json`
 - `somascope.db`
 - `exports/`
 - `raw/`
