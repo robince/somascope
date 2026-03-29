@@ -16,9 +16,11 @@ import (
 type Task func(context.Context, *Tracker) error
 
 type Manager struct {
-	store  *store.Store
-	mu     sync.Mutex
-	active map[string]string
+	store     *store.Store
+	mu        sync.Mutex
+	active    map[string]string
+	ctx       context.Context
+	cancelAll context.CancelFunc
 }
 
 type Tracker struct {
@@ -29,14 +31,22 @@ type Tracker struct {
 }
 
 func NewManager(st *store.Store) (*Manager, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{
-		store:  st,
-		active: map[string]string{},
+		store:     st,
+		active:    map[string]string{},
+		ctx:       ctx,
+		cancelAll: cancel,
 	}
 	if err := st.MarkRunningSyncRunsInterrupted(context.Background(), "sync interrupted because somascope restarted"); err != nil {
+		cancel()
 		return nil, err
 	}
 	return manager, nil
+}
+
+func (m *Manager) Shutdown() {
+	m.cancelAll()
 }
 
 func (m *Manager) Start(provider, mode, requestedStartDate, requestedEndDate string, task Task) (store.SyncRun, bool, error) {
@@ -75,7 +85,7 @@ func (m *Manager) Start(provider, mode, requestedStartDate, requestedEndDate str
 
 	go func() {
 		defer m.finish(provider, run.ID)
-		if err := task(context.Background(), tracker); err != nil {
+		if err := task(m.ctx, tracker); err != nil {
 			if failErr := tracker.FailUnknown(err); failErr != nil {
 				log.Printf("warning: failed updating sync run %s failure state: %v", run.ID, failErr)
 			}

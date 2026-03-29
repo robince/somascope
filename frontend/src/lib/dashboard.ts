@@ -132,7 +132,7 @@ function wrapNightMinutes(value: string): number | null {
     return null;
   }
 
-  let minutes = date.getHours() * 60 + date.getMinutes();
+  let minutes = date.getUTCHours() * 60 + date.getUTCMinutes();
   if (minutes < NIGHT_AXIS_START_MINUTES) {
     minutes += 24 * 60;
   }

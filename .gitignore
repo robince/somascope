@@ -11,3 +11,4 @@
 /.tmp-data/
 /somascope
 *.log
+.claude/settings.local.json

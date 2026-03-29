@@ -7,7 +7,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/robince/somascope/internal/config"
 	"github.com/robince/somascope/internal/server"
@@ -29,7 +32,10 @@ func main() {
 	if err := cfg.EnsureLayout(); err != nil {
 		log.Fatal(err)
 	}
-	configureLogging(cfg.LogsDir)
+	logFile := configureLogging(cfg.LogsDir)
+	if logFile != nil {
+		defer logFile.Close()
+	}
 
 	db, err := store.Open(context.Background(), cfg.DBPath)
 	if err != nil {
@@ -51,17 +57,40 @@ func main() {
 	log.Printf("data dir: %s", cfg.DataDir)
 	log.Printf("auth mode: %s", cfg.AuthMode)
 
-	if err := http.ListenAndServe(addr, srv.Handler()); err != nil {
-		log.Fatal(err)
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: srv.Handler(),
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("shutting down...")
+
+	srv.Shutdown()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("warning: http server shutdown error: %v", err)
 	}
 }
 
-func configureLogging(logsDir string) {
+func configureLogging(logsDir string) *os.File {
 	logPath := filepath.Join(logsDir, "somascope.log")
 	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Printf("warning: failed opening log file %s: %v", logPath, err)
-		return
+		return nil
 	}
 	log.SetOutput(io.MultiWriter(os.Stdout, file))
+	return file
 }

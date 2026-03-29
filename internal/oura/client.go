@@ -41,8 +41,9 @@ type Client struct {
 }
 
 type RetryConfig struct {
-	MaxAttempts int
-	OnRetry     func(*APIError, time.Duration)
+	MaxAttempts    int
+	OnRetry        func(*APIError, time.Duration)
+	OnUnauthorized func(ctx context.Context, staleToken string) (string, error)
 }
 
 type CollectionPage struct {
@@ -312,6 +313,9 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 		maxAttempts = 1
 	}
 
+	currentToken := accessToken
+	refreshed := false
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		reqURL := APIBaseURL + path
 		if len(params) > 0 {
@@ -322,7 +326,7 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Authorization", "Bearer "+currentToken)
 		req.Header.Set("Accept", "application/json")
 
 		if c.RateLimiter != nil {
@@ -360,6 +364,15 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 				StatusCode:   resp.StatusCode,
 				ResponseBody: truncate(strings.TrimSpace(string(body)), 512),
 				RetryAfter:   parseRetryAfter(resp.Header.Get("Retry-After")),
+			}
+			if resp.StatusCode == http.StatusUnauthorized && !refreshed && retry.OnUnauthorized != nil {
+				newToken, refreshErr := retry.OnUnauthorized(ctx, currentToken)
+				if refreshErr == nil && newToken != "" {
+					currentToken = newToken
+					refreshed = true
+					attempt-- // don't count the 401 against the retry budget
+					continue
+				}
 			}
 			if apiErr.Retriable() && attempt < maxAttempts {
 				backoff := retryDelay(attempt, apiErr.RetryAfter)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -23,27 +24,27 @@ const (
 	ouraOAuthReturnToKey = "oauth:oura:return_to"
 )
 
-func (s *Server) handleOuraStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleOuraStatus(w http.ResponseWriter, r *http.Request) {
 	provider, err := s.settings.Provider("oura")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	overview, err := s.store.ProviderOverview(context.Background(), "oura", provider.Configured)
+	overview, err := s.store.ProviderOverview(r.Context(), "oura", provider.Configured)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	syncStates, err := s.store.SyncStatesByProvider(context.Background(), "oura")
+	syncStates, err := s.store.SyncStatesByProvider(r.Context(), "oura")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
 	var currentRun *store.SyncRun
-	if run, err := s.store.CurrentSyncRunByProvider(context.Background(), "oura"); err == nil {
+	if run, err := s.store.CurrentSyncRunByProvider(r.Context(), "oura"); err == nil {
 		currentRun = &run
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, err)
@@ -51,7 +52,7 @@ func (s *Server) handleOuraStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	var lastCompletedRun *store.SyncRun
-	if run, err := s.store.LatestFinishedSyncRunByProvider(context.Background(), "oura"); err == nil {
+	if run, err := s.store.LatestFinishedSyncRunByProvider(r.Context(), "oura"); err == nil {
 		lastCompletedRun = &run
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, err)
@@ -59,7 +60,7 @@ func (s *Server) handleOuraStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	var lastSuccessfulRun *store.SyncRun
-	if run, err := s.store.LatestSuccessfulSyncRunByProvider(context.Background(), "oura"); err == nil {
+	if run, err := s.store.LatestSuccessfulSyncRunByProvider(r.Context(), "oura"); err == nil {
 		lastSuccessfulRun = &run
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, err)
@@ -149,7 +150,10 @@ func (s *Server) handleOuraAuthStart(w http.ResponseWriter, r *http.Request) {
 		ReturnTo string `json:"return_to"`
 	}
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && err != io.EOF {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+			return
+		}
 	}
 
 	returnTo := firstValidReturnTo(strings.TrimSpace(payload.ReturnTo), appRootFromRedirect(provider.RedirectURI))
@@ -187,7 +191,11 @@ func (s *Server) handleOuraCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read oauth state", http.StatusInternalServerError)
 		return
 	}
-	if expectedState != "" && r.URL.Query().Get("state") != expectedState {
+	if expectedState == "" {
+		http.Error(w, "no oauth flow in progress", http.StatusBadRequest)
+		return
+	}
+	if r.URL.Query().Get("state") != expectedState {
 		http.Error(w, "oauth state mismatch", http.StatusBadRequest)
 		return
 	}
@@ -266,7 +274,10 @@ func (s *Server) handleOuraSync(w http.ResponseWriter, r *http.Request) {
 		EndDate   string `json:"end_date"`
 	}
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&request)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil && err != io.EOF {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+			return
+		}
 	}
 
 	endDate := strings.TrimSpace(request.EndDate)

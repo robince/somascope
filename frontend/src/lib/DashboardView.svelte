@@ -91,8 +91,22 @@
   $: readinessPath = buildPathFromPoints(readinessRawPoints);
   $: readinessSmoothPath = buildPathFromPoints(readinessSmoothPoints);
   $: readinessDotCount = readinessRawPoints.length;
-  $: sleepStartPoints = buildSeriesPoints(sleepStartValues, buckets, chartTimeAxis, sleepY, SLEEP_CHART_HEIGHT);
-  $: sleepEndPoints = buildSeriesPoints(sleepEndValues, buckets, chartTimeAxis, sleepY, SLEEP_CHART_HEIGHT);
+  $: sleepPairedPoints = (() => {
+    if (!chartTimeAxis) return { start: [] as SeriesPoint[], end: [] as SeriesPoint[] };
+    const start: SeriesPoint[] = [];
+    const end: SeriesPoint[] = [];
+    for (const [index, bucket] of buckets.entries()) {
+      const sv = sleepStartValues[index];
+      const ev = sleepEndValues[index];
+      if (sv == null || ev == null) continue;
+      const x = scaledBucketCenterX(bucket, chartTimeAxis);
+      start.push({ key: bucket.start_date, x, y: clamp(sleepY(sv), CHART_PAD_TOP, SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM) });
+      end.push({ key: bucket.start_date, x, y: clamp(sleepY(ev), CHART_PAD_TOP, SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM) });
+    }
+    return { start, end };
+  })();
+  $: sleepStartPoints = sleepPairedPoints.start;
+  $: sleepEndPoints = sleepPairedPoints.end;
   $: sleepBandPath = buildBandPathFromPoints(sleepStartPoints, sleepEndPoints);
   $: sleepStartPath = buildPathFromPoints(sleepStartPoints);
   $: sleepEndPath = buildPathFromPoints(sleepEndPoints);

@@ -67,6 +67,10 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
+func (s *Server) Shutdown() {
+	s.syncs.Shutdown()
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/v1/app", s.handleApp)

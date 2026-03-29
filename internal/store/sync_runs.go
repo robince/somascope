@@ -354,7 +354,7 @@ func mustJSONText(value any) string {
 		return ""
 	}
 	data, err := json.Marshal(value)
-	if err != nil {
+	if err != nil || string(data) == "null" {
 		return ""
 	}
 	return string(data)
