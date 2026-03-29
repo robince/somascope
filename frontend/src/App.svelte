@@ -7,7 +7,6 @@
     AppInfo,
     AppView,
     DashboardOverview,
-    ExportFormat,
     OuraRecent,
     OuraStatus,
     PeriodId,
@@ -33,7 +32,6 @@
   };
 
   let appInfo: AppInfo | null = null;
-  let formats: ExportFormat[] = [];
   let dashboard: DashboardOverview | null = null;
   let providers: ProviderSettings[] = [];
   let ouraStatus: OuraStatus | null = null;
@@ -43,7 +41,6 @@
   let activePeriod: PeriodId = "1m";
   let windowEndDate = "";
   let appInfoLoading = true;
-  let formatsLoading = true;
   let providerSettingsLoading = true;
   let dashboardLoading = true;
   let statusLoading = true;
@@ -53,7 +50,6 @@
   let ouraBusy = false;
   let dirty = false;
   let appInfoError = "";
-  let formatsError = "";
   let settingsError = "";
   let dashboardError = "";
   let statusError = "";
@@ -64,8 +60,8 @@
   let syncStartDate = "";
   let ouraStatusPollTimer: ReturnType<typeof window.setInterval> | null = null;
 
-  $: settingsLoading = appInfoLoading || formatsLoading || providerSettingsLoading || statusLoading || recentLoading;
-  $: settingsViewError = actionError || statusError || settingsError || recentError || appInfoError || formatsError;
+  $: settingsLoading = appInfoLoading || providerSettingsLoading || statusLoading || recentLoading;
+  $: settingsViewError = actionError || statusError || settingsError || recentError || appInfoError;
 
   function baseProvider(provider: ProviderSettings["provider"]): ProviderSettings {
     const defaults = PROVIDER_DEFAULTS[provider];
@@ -191,20 +187,6 @@
     }
   }
 
-  async function loadFormats() {
-    formatsLoading = true;
-    formatsError = "";
-    try {
-      const payload = await fetchJSON<{ items?: ExportFormat[] }>("/api/v1/export/formats", "Failed to load export formats.");
-      formats = payload.items ?? [];
-    } catch (err) {
-      formatsError = messageForError(err);
-      formats = [];
-    } finally {
-      formatsLoading = false;
-    }
-  }
-
   async function loadSettingsData() {
     providerSettingsLoading = true;
     settingsError = "";
@@ -271,7 +253,6 @@
     actionError = "";
     await Promise.all([
       loadAppInfo(),
-      loadFormats(),
       loadSettingsData(),
       loadDashboardData(),
       loadOuraStatus(),
@@ -550,7 +531,7 @@
   <header class="topbar">
     <div class="brand">
       <p class="brand-mark">SOMASCOPE</p>
-      <span>Local-first wearable dashboard</span>
+      <span>Your local wearable health data store</span>
     </div>
 
     <nav class="view-switch" aria-label="Primary views">
@@ -577,7 +558,6 @@
   <section hidden={activeView !== "settings"} aria-hidden={activeView !== "settings"}>
     <SettingsView
       {appInfo}
-      {formats}
       {providers}
       {ouraStatus}
       {ouraRecent}

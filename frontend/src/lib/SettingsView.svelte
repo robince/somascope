@@ -1,8 +1,7 @@
 <script lang="ts">
-  import type { AppInfo, ExportFormat, OuraRecent, OuraStatus, ProviderSettings } from "./types";
+  import type { AppInfo, OuraRecent, OuraStatus, ProviderSettings } from "./types";
 
   export let appInfo: AppInfo | null = null;
-  export let formats: ExportFormat[] = [];
   export let providers: ProviderSettings[] = [];
   export let ouraStatus: OuraStatus | null = null;
   export let ouraRecent: OuraRecent = { daily_records: [], sleep_sessions: [] };
@@ -25,6 +24,19 @@
   export let onSyncStartDateInput: (value: string) => void = () => {};
   export let onTimezoneInput: (value: string) => void = () => {};
   export let onProviderInput: (index: number, field: keyof ProviderSettings, value: string | boolean) => void = () => {};
+
+  const showFitbitCredentialCard = false;
+  const ouraApplicationURL = "https://developer.ouraring.com/applications";
+  const ouraApplicationFields = [
+    { label: "Name", value: "My Somastat" },
+    { label: "Description", value: "Local data viewer" },
+    { label: "Contact Email", value: "your email" },
+    { label: "Website", value: "https://github.com/robince/somascope" },
+    { label: "Privacy policy", value: "https://github.com/robince/somascope" },
+    { label: "Terms of service", value: "https://github.com/robince/somascope" },
+    { label: "Redirect URI", value: "http://localhost:18080/oauth/oura/callback" },
+    { label: "Scopes", value: "Select all" }
+  ];
 
   function numberValue(value: unknown): string {
     if (typeof value === "number") {
@@ -85,11 +97,7 @@
   <div class="hero-grid">
     <article class="panel intro-panel">
       <p class="eyebrow">Settings</p>
-      <h1>Local OAuth and storage controls.</h1>
-      <p class="lede">
-        The dashboard is now the default face of the app. Settings stays where connection state,
-        credentials, sync controls, and export boundaries remain explicit.
-      </p>
+      <h1>Somascope Settings</h1>
 
       <div class="facts">
         <article>
@@ -138,15 +146,9 @@
     <div class="section-head">
       <div>
         <p class="eyebrow">Sync controls</p>
-        <h2>Update or backfill Oura data</h2>
+        <h2>Backfill Oura data</h2>
       </div>
     </div>
-
-    <p class="helper">
-      The main update action already handles incremental sync from the last stored cursor with a 3 day overlap.
-      This section is for larger history loads from a date you choose.
-      Once a sync starts, it keeps running in the local app even if you refresh this page.
-    </p>
 
     {#if statusLoading}
       <p class="status-copy">Checking local Oura connection status...</p>
@@ -163,7 +165,6 @@
 
     <div class="sync-grid">
       <article class="sync-card">
-        <strong>Backfill from date</strong>
         <p class="sync-copy">Pull older history from a specific day up to the present. Pick the earliest date you actually want to fetch.</p>
         <label class="field">
           <span class="field-label">Start date</span>
@@ -174,9 +175,6 @@
             onchange={handleSyncStartDateEvent}
           />
         </label>
-        {#if !syncStartDate}
-          <p class="field-note">Choose a start date to enable backfill.</p>
-        {/if}
         <button
           class="button button-ghost"
           type="button"
@@ -327,7 +325,8 @@
     {:else}
       <div class="provider-grid">
         {#each providers as provider, index}
-          <article class="provider-card" id={provider.provider === "oura" ? "oura-sync" : undefined}>
+          {#if provider.provider !== "fitbit" || showFitbitCredentialCard}
+          <article class="provider-card">
             <div class="provider-head">
               <div>
                 <h3>{provider.provider === "fitbit" ? "Fitbit" : "Oura"}</h3>
@@ -337,6 +336,40 @@
                 {provider.configured ? "Configured" : "Not configured"}
               </span>
             </div>
+
+            {#if provider.provider === "oura"}
+              <div class="setup-guide">
+                <div class="setup-guide-head">
+                  <div>
+                    <p class="setup-guide-kicker">Oura app setup</p>
+                    <h4>Create an Oura developer app first</h4>
+                  </div>
+                  <a class="button button-ghost" href={ouraApplicationURL} target="_blank" rel="noreferrer">Open Oura developer page</a>
+                </div>
+
+                <div class="setup-guide-grid">
+                  <div class="setup-copy">
+                    <p class="setup-copy-intro">
+                      Create the app in Oura first, then paste the generated credentials into somascope below.
+                    </p>
+                    <ol class="setup-steps">
+                      <li>Open the Oura applications page and click <strong>Create new</strong>.</li>
+                      <li>Enter the values shown in the details column.</li>
+                      <li>Copy the generated client ID and client secret into somascope, save local settings, then use <strong>Connect Oura</strong>.</li>
+                    </ol>
+                  </div>
+
+                  <dl class="setup-values">
+                    {#each ouraApplicationFields as field}
+                      <div class="setup-value">
+                        <dt>{field.label}</dt>
+                        <dd><code>{field.value}</code></dd>
+                      </div>
+                    {/each}
+                  </dl>
+                </div>
+              </div>
+            {/if}
 
             <div class="field-grid">
               <label class="field field-wide">
@@ -360,19 +393,11 @@
               </label>
 
               <label class="field field-wide">
-                <span class="field-label">Redirect URI</span>
-                <input
-                  type="text"
-                  value={provider.redirect_uri}
-                  oninput={(event) => onProviderInput(index, "redirect_uri", (event.currentTarget as HTMLInputElement).value)}
-                />
-              </label>
-
-              <label class="field field-wide">
                 <span class="field-label">Default scopes</span>
                 <input
                   type="text"
                   value={provider.default_scopes}
+                  placeholder={provider.provider === "oura" ? "Leave blank to request all app scopes" : undefined}
                   oninput={(event) => onProviderInput(index, "default_scopes", (event.currentTarget as HTMLInputElement).value)}
                 />
               </label>
@@ -423,6 +448,7 @@
               {/if}
             {/if}
           </article>
+          {/if}
         {/each}
       </div>
     {/if}
@@ -435,30 +461,11 @@
     {/if}
   </article>
 
-  <article class="panel exports-panel">
-    <div class="section-head">
-      <div>
-        <p class="eyebrow">Export roadmap</p>
-        <h2>Keep escape hatches explicit</h2>
-      </div>
-    </div>
-
-    <div class="formats">
-      {#each formats as format}
-        <article class="format">
-          <strong>{format.label}</strong>
-          <span>{format.description}</span>
-          <small>{format.status}</small>
-        </article>
-      {/each}
-    </div>
-  </article>
-
   <article class="panel data-panel">
     <div class="section-head">
       <div>
-        <p class="eyebrow">Recent Oura Data</p>
-        <h2>See what the sync actually pulled</h2>
+        <p class="eyebrow">Recent data</p>
+        <h2>Last Oura data</h2>
       </div>
     </div>
 
@@ -520,7 +527,6 @@
 <style>
   .settings-shell,
   .facts,
-  .formats,
   .provider-grid,
   .field-grid,
   .stack {
@@ -530,7 +536,7 @@
 
   .hero-grid {
     display: grid;
-    grid-template-columns: 1.3fr 0.95fr;
+    grid-template-columns: 1fr;
     gap: 18px;
   }
 
@@ -561,7 +567,6 @@
   }
 
   h1 {
-    max-width: 13ch;
     font-size: clamp(1.9rem, 4.1vw, 3rem);
     line-height: 0.95;
   }
@@ -574,19 +579,12 @@
     font-size: 1.2rem;
   }
 
-  .lede,
   .helper,
   .status-copy,
   .provider-head p,
-  .stack-row dd,
-  .format span {
+  .stack-row dd {
     color: var(--muted);
     line-height: 1.55;
-  }
-
-  .lede {
-    margin-top: 14px;
-    max-width: 46rem;
   }
 
   .facts {
@@ -595,7 +593,6 @@
   }
 
   .facts article,
-  .format,
   .provider-card,
   .data-card {
     border: 1px solid var(--line);
@@ -604,7 +601,14 @@
     padding: 14px;
   }
 
-  strong {
+  span {
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+
+  .facts article strong,
+  .sync-meta-card strong,
+  .data-card > strong {
     display: block;
     margin-bottom: 8px;
     font-size: 13px;
@@ -612,24 +616,21 @@
     text-transform: uppercase;
   }
 
-  span {
-    color: var(--muted);
-    overflow-wrap: anywhere;
-  }
-
   .stack {
     margin-top: 14px;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
   .stack-row {
     display: grid;
     gap: 4px;
-    padding: 12px 0;
-    border-bottom: 1px solid var(--line);
+    padding: 0 14px 0 0;
+    border-right: 1px solid var(--line);
   }
 
   .stack-row:last-child {
-    border-bottom: 0;
+    border-right: 0;
+    padding-right: 0;
   }
 
   dt {
@@ -645,7 +646,6 @@
   }
 
   .settings-panel,
-  .exports-panel,
   .data-panel {
     margin-top: 18px;
   }
@@ -701,6 +701,98 @@
     margin-top: 18px;
   }
 
+  .setup-guide {
+    margin-top: 16px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(248, 244, 233, 0.72);
+    padding: 16px;
+  }
+
+  .setup-guide-head {
+    display: flex;
+    gap: 16px;
+    align-items: start;
+    justify-content: space-between;
+  }
+
+  .setup-guide-kicker {
+    margin: 0 0 6px;
+    color: var(--accent);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  h4 {
+    margin: 0;
+    font-size: 1rem;
+  }
+
+  .setup-guide-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+    gap: 18px;
+    margin-top: 14px;
+    align-items: start;
+  }
+
+  .setup-copy {
+    display: grid;
+    gap: 10px;
+  }
+
+  .setup-copy-intro {
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.55;
+  }
+
+  .setup-steps {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--muted);
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+
+  .setup-values {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+  }
+
+  .setup-value {
+    display: grid;
+    gap: 6px;
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+
+  .setup-value:first-child {
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .setup-value dt {
+    margin: 0;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+
+  .setup-value dd {
+    margin: 0;
+  }
+
+  code {
+    font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+    font-size: 0.86rem;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+
   .provider-head {
     display: flex;
     gap: 16px;
@@ -739,16 +831,9 @@
   }
 
   .field-label {
-    font-size: 13px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: 0.82rem;
+    font-weight: 600;
     color: var(--accent);
-  }
-
-  .field-note {
-    margin: -4px 0 0;
-    color: var(--muted);
-    line-height: 1.45;
   }
 
   input {
@@ -775,19 +860,6 @@
 
   .status-copy.success {
     color: #246646;
-  }
-
-  .formats {
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    margin-top: 16px;
-  }
-
-  .format small {
-    display: inline-block;
-    margin-top: 10px;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
   }
 
   .data-grid {
@@ -848,10 +920,17 @@
   }
 
   @media (max-width: 960px) {
-    .hero-grid,
     .facts,
     .field-grid,
     .data-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .stack {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .setup-guide-grid {
       grid-template-columns: 1fr;
     }
 
@@ -863,7 +942,8 @@
   @media (max-width: 720px) {
     .section-head,
     .provider-head,
-    .actions {
+    .actions,
+    .setup-guide-head {
       flex-direction: column;
       align-items: flex-start;
     }
@@ -875,6 +955,21 @@
     .record-metrics {
       justify-items: start;
       text-align: left;
+    }
+
+    .stack {
+      grid-template-columns: 1fr;
+    }
+
+    .stack-row {
+      padding: 0 0 12px;
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .stack-row:last-child {
+      padding-bottom: 0;
+      border-bottom: 0;
     }
 
     .panel {

@@ -11,13 +11,6 @@ export type AppInfo = {
   };
 };
 
-export type ExportFormat = {
-  id: string;
-  label: string;
-  description: string;
-  status: string;
-};
-
 export type ProviderName = "fitbit" | "oura";
 
 export type ProviderSettings = {
