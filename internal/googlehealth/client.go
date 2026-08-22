@@ -266,8 +266,7 @@ func (c *Client) tokenRequest(ctx context.Context, values url.Values) (TokenBund
 }
 
 func (c *Client) GetRaw(ctx context.Context, accessToken, path string, retry RetryConfig) (json.RawMessage, error) {
-	var payload map[string]any
-	return c.doJSON(ctx, http.MethodGet, accessToken, path, nil, nil, &payload, retry)
+	return c.doJSON(ctx, http.MethodGet, accessToken, path, nil, nil, nil, retry)
 }
 
 func (c *Client) GetIdentity(ctx context.Context, accessToken string) (Identity, error) {
