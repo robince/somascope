@@ -206,6 +206,7 @@
   $: sleepTrends = providerTrends.filter((series) => series.hasSleep);
   $: activityDotCount = providerTrends.reduce((count, series) => count + series.activityRawPoints.length, 0);
   $: readinessDotCount = readinessTrends.reduce((count, series) => count + series.readinessRawPoints.length, 0);
+  $: sleepDotCount = sleepTrends.reduce((count, series) => count + series.sleepStartPoints.length, 0);
   $: averageReadiness = averageDefined(
     visibleDays.flatMap((day) => selectedProviders.map((provider) => dayReadiness(day, provider)?.score))
   );
@@ -898,7 +899,7 @@
             {/each}
 
             {#each sleepTrends as series (series.provider)}
-              {#if series.sleepStartPoints.length <= 40}
+              {#if sleepDotCount <= 40}
                 {#each series.sleepStartPoints as point (point.key)}
                   <circle cx={point.x} cy={point.y} r="2.5" class="trend-dot sleep-start-dot {seriesClass(series.provider)}" />
                 {/each}
