@@ -370,7 +370,7 @@ func skipSparseRange(ctx context.Context, st *store.Store, fetchedAt string, ent
 		cursor := ""
 		if entity.useCursor {
 			cursor = chunkLabel
-			if err := st.UpsertSyncState(ctx, "oura", entity.kind, cursor, fetchedAt); err != nil {
+			if err := advanceSyncState(ctx, st, entity.kind, cursor, fetchedAt); err != nil {
 				return failEntity(tracker, entity, chunkLabel, chunkLabel, "update_sync_state", err)
 			}
 		}
@@ -429,7 +429,7 @@ func syncEntityDay(ctx context.Context, st *store.Store, client *Client, accessT
 	cursor := ""
 	if entity.useCursor {
 		cursor = chunkLabel
-		if err := st.UpsertSyncState(ctx, "oura", entity.kind, cursor, fetchedAt); err != nil {
+		if err := advanceSyncState(ctx, st, entity.kind, cursor, fetchedAt); err != nil {
 			return failEntity(tracker, entity, chunkLabel, chunkLabel, "update_sync_state", err)
 		}
 	}
@@ -539,6 +539,17 @@ func resolveEntityStart(ctx context.Context, st *store.Store, entityKind, explic
 	default:
 		return time.Time{}, err
 	}
+}
+
+func advanceSyncState(ctx context.Context, st *store.Store, entityKind, cursor, fetchedAt string) error {
+	current, _, err := st.SyncState(ctx, "oura", entityKind)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if err == nil && current > cursor {
+		cursor = current
+	}
+	return st.UpsertSyncState(ctx, "oura", entityKind, cursor, fetchedAt)
 }
 
 func resolveEndDate(value string) (time.Time, error) {
