@@ -445,7 +445,13 @@ func (s *Server) completeProviderAuth(ctx context.Context, provider string, cfg 
 			ConnectedAt:    now,
 		}, nil
 	case providerGoogleHealth:
-		verifier, _ := s.store.AppSetting(ctx, oauthVerifierKey(provider))
+		verifier, err := s.store.AppSetting(ctx, oauthVerifierKey(provider))
+		if err != nil {
+			return store.Connection{}, fmt.Errorf("read Google Health OAuth verifier: %w", err)
+		}
+		if strings.TrimSpace(verifier) == "" {
+			return store.Connection{}, fmt.Errorf("Google Health OAuth verifier is missing; restart the connection flow")
+		}
 		bundle, err := s.googleHealth.ExchangeCode(ctx, googlehealth.AppConfig{
 			ClientID:      cfg.ClientID,
 			ClientSecret:  cfg.ClientSecret,
