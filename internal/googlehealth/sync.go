@@ -711,7 +711,11 @@ func resolveStartDate(ctx context.Context, st *store.Store, requested string, en
 	cursor, _, err := st.SyncState(ctx, Provider, "daily_activity")
 	if err == nil {
 		if parsed, parseErr := time.Parse(dateLayout, cursor); parseErr == nil {
-			return parsed.AddDate(0, 0, -defaultIncrementalOverlap), nil
+			start := parsed.AddDate(0, 0, -defaultIncrementalOverlap)
+			if start.After(end) {
+				start = end
+			}
+			return start, nil
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return time.Time{}, err

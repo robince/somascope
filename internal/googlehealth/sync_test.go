@@ -148,6 +148,26 @@ func TestFilterECGPagesHonorsRequestedEndDate(t *testing.T) {
 	}
 }
 
+func TestResolveStartDateClampsCursorOverlapToEnd(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.UpsertSyncState(context.Background(), Provider, "daily_activity", "2026-08-22", "2026-08-22T12:00:00Z"); err != nil {
+		t.Fatalf("seed sync state: %v", err)
+	}
+	end, _ := time.Parse(dateLayout, "2026-08-10")
+
+	start, err := resolveStartDate(context.Background(), st, "", end)
+	if err != nil {
+		t.Fatalf("resolve start date: %v", err)
+	}
+	if !start.Equal(end) {
+		t.Fatalf("expected start to clamp to %s, got %s", end.Format(dateLayout), start.Format(dateLayout))
+	}
+}
+
 func TestSleepLocalDateUsesCivilOffsetNotUTC(t *testing.T) {
 	session, ok := sleepSessionFrom(map[string]any{
 		"sleep": map[string]any{
