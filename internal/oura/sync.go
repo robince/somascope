@@ -152,12 +152,13 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 	if err := tracker.SetEffectiveRange(overallStart.Format(dateLayout), endDate.Format(dateLayout)); err != nil {
 		return err
 	}
+	baseAccessToken := currentAccessToken()
 
 	for _, entity := range entities {
 		if entity.queryMode != queryModeNone {
 			continue
 		}
-		if err := syncEntityNoRange(ctx, st, syncClient, activeConnection.AccessToken, fetchedAt, entity, tracker, onUnauthorized, currentAccessToken); err != nil {
+		if err := syncEntityNoRange(ctx, st, syncClient, baseAccessToken, fetchedAt, entity, tracker, onUnauthorized, currentAccessToken); err != nil {
 			return err
 		}
 	}
@@ -190,7 +191,7 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := syncEntityRange(syncCtx, st, syncClient, activeConnection.AccessToken, fetchedAt, job.entity, job.startDate, endDate, tracker, onUnauthorized, currentAccessToken); err != nil {
+			if err := syncEntityRange(syncCtx, st, syncClient, baseAccessToken, fetchedAt, job.entity, job.startDate, endDate, tracker, onUnauthorized, currentAccessToken); err != nil {
 				errOnce.Do(func() {
 					firstErr = err
 					cancel()
