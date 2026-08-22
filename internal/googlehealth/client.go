@@ -36,7 +36,6 @@ func DefaultReadonlyScopes() []string {
 		"https://www.googleapis.com/auth/googlehealth.settings.readonly",
 		"https://www.googleapis.com/auth/googlehealth.ecg.readonly",
 		"https://www.googleapis.com/auth/googlehealth.irn.readonly",
-		"https://www.googleapis.com/auth/googlehealth.location.readonly",
 	}
 }
 

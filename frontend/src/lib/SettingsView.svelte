@@ -42,7 +42,7 @@
     { label: "OAuth client type", value: "Web application" },
     { label: "Redirect URI", value: "http://localhost:18080/oauth/google_health/callback" },
     { label: "Publishing status", value: "Testing, add yourself as a test user" },
-    { label: "Scopes", value: "All Google Health readonly scopes (activity, sleep, vitals, nutrition, profile, settings, ECG, IRN, location)" }
+    { label: "Scopes", value: "Required Google Health readonly scopes (activity, sleep, vitals, nutrition, profile, settings, ECG, IRN)" }
   ];
 
   function numberValue(value: unknown): string {
