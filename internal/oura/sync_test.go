@@ -2,11 +2,30 @@ package oura
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"path/filepath"
 	"testing"
 
 	"github.com/robince/somascope/internal/store"
 )
+
+func TestTokenRefreshRequiresReauthOnlyForTerminalOAuthErrors(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{err: &OAuthTokenError{StatusCode: http.StatusBadRequest, Code: "invalid_grant"}, want: true},
+		{err: &OAuthTokenError{StatusCode: http.StatusBadRequest, Code: "invalid_token"}, want: true},
+		{err: &OAuthTokenError{StatusCode: http.StatusTooManyRequests, Code: "temporarily_unavailable"}},
+		{err: errors.New("connection reset")},
+	}
+	for _, tt := range tests {
+		if got := tokenRefreshRequiresReauth(tt.err); got != tt.want {
+			t.Fatalf("tokenRefreshRequiresReauth(%v) = %v, want %v", tt.err, got, tt.want)
+		}
+	}
+}
 
 func TestAdvanceSyncStateDoesNotRewindCursor(t *testing.T) {
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))

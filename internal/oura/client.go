@@ -36,6 +36,18 @@ type TokenBundle struct {
 	ExpiresAt    time.Time
 }
 
+type OAuthTokenError struct {
+	StatusCode  int
+	Code        string
+	Description string
+	Body        string
+}
+
+func (e *OAuthTokenError) Error() string {
+	detail := firstNonEmpty(strings.TrimSpace(e.Description), strings.TrimSpace(e.Body), strings.TrimSpace(e.Code))
+	return fmt.Sprintf("oura token request failed with status %d: %s", e.StatusCode, truncate(detail, 512))
+}
+
 type Client struct {
 	HTTPClient  *http.Client
 	RateLimiter RequestLimiter
@@ -217,7 +229,12 @@ func (c *Client) tokenRequest(ctx context.Context, values url.Values) (TokenBund
 		return TokenBundle{}, closeErr
 	}
 	if resp.StatusCode >= 400 {
-		return TokenBundle{}, fmt.Errorf("oura token request failed: %s", strings.TrimSpace(string(body)))
+		var payload struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		return TokenBundle{}, &OAuthTokenError{StatusCode: resp.StatusCode, Code: strings.TrimSpace(payload.Error), Description: strings.TrimSpace(payload.ErrorDescription), Body: strings.TrimSpace(string(body))}
 	}
 
 	var payload struct {

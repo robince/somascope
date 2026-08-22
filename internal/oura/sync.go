@@ -69,6 +69,9 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 	if tokenExpired(activeConnection.TokenExpiresAt) && activeConnection.RefreshToken != "" {
 		refreshed, err := client.RefreshToken(ctx, cfg, activeConnection.RefreshToken)
 		if err != nil {
+			if tokenRefreshRequiresReauth(err) {
+				_ = markNeedsReauth(ctx, st, activeConnection)
+			}
 			return tracker.Fail("oauth", &store.SyncError{
 				At:         now(),
 				EntityKind: "oauth",
@@ -113,10 +116,14 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 			return activeConnection.AccessToken, nil
 		}
 		if activeConnection.RefreshToken == "" {
+			_ = markNeedsReauth(ctx, st, activeConnection)
 			return "", fmt.Errorf("no refresh token available")
 		}
 		refreshed, err := client.RefreshToken(ctx, cfg, activeConnection.RefreshToken)
 		if err != nil {
+			if tokenRefreshRequiresReauth(err) {
+				_ = markNeedsReauth(ctx, st, activeConnection)
+			}
 			return "", err
 		}
 		activeConnection.AccessToken = refreshed.AccessToken
@@ -551,6 +558,24 @@ func advanceSyncState(ctx context.Context, st *store.Store, entityKind, cursor, 
 		cursor = current
 	}
 	return st.UpsertSyncState(ctx, "oura", entityKind, cursor, fetchedAt)
+}
+
+func markNeedsReauth(ctx context.Context, st *store.Store, connection store.Connection) error {
+	connection.Status = "needs_reauth"
+	return st.UpsertConnection(ctx, connection)
+}
+
+func tokenRefreshRequiresReauth(err error) bool {
+	var tokenErr *OAuthTokenError
+	if !errors.As(err, &tokenErr) {
+		return false
+	}
+	switch tokenErr.Code {
+	case "invalid_grant", "invalid_token":
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveEndDate(value string) (time.Time, error) {
