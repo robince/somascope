@@ -160,7 +160,7 @@ func TestFilterECGPagesHonorsRequestedEndDate(t *testing.T) {
 	}
 }
 
-func TestResolveStartDateClampsCursorOverlapToEnd(t *testing.T) {
+func TestResolveEntityStartDateClampsCursorOverlapToEnd(t *testing.T) {
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -175,12 +175,53 @@ func TestResolveStartDateClampsCursorOverlapToEnd(t *testing.T) {
 	}
 	end, _ := time.Parse(dateLayout, "2026-08-10")
 
-	start, err := resolveStartDate(context.Background(), st, "", end)
+	start, err := resolveEntityStartDate(context.Background(), st, "daily_activity", "", end)
 	if err != nil {
 		t.Fatalf("resolve start date: %v", err)
 	}
 	if !start.Equal(end) {
 		t.Fatalf("expected start to clamp to %s, got %s", end.Format(dateLayout), start.Format(dateLayout))
+	}
+}
+
+func TestResolveEntityStartDateUsesIndependentCursors(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	ctx := context.Background()
+	if err := st.UpsertSyncState(ctx, Provider, "daily_activity", "2026-08-20", "2026-08-20T12:00:00Z"); err != nil {
+		t.Fatalf("seed activity state: %v", err)
+	}
+	if err := st.UpsertSyncState(ctx, Provider, "sleep", "2026-07-15", "2026-07-15T12:00:00Z"); err != nil {
+		t.Fatalf("seed sleep state: %v", err)
+	}
+	end, _ := time.Parse(dateLayout, "2026-08-22")
+	activityStart, err := resolveEntityStartDate(ctx, st, "daily_activity", "", end)
+	if err != nil {
+		t.Fatalf("resolve activity start: %v", err)
+	}
+	sleepStart, err := resolveEntityStartDate(ctx, st, "sleep", "", end)
+	if err != nil {
+		t.Fatalf("resolve sleep start: %v", err)
+	}
+	rawStart, err := resolveEntityStartDate(ctx, st, "heartrate", "", end)
+	if err != nil {
+		t.Fatalf("resolve raw start: %v", err)
+	}
+	if got := activityStart.Format(dateLayout); got != "2026-08-17" {
+		t.Fatalf("expected activity overlap start 2026-08-17, got %s", got)
+	}
+	if got := sleepStart.Format(dateLayout); got != "2026-07-12" {
+		t.Fatalf("expected independent sleep overlap start 2026-07-12, got %s", got)
+	}
+	if got := rawStart.Format(dateLayout); got != "2026-07-24" {
+		t.Fatalf("expected missing raw cursor to bootstrap at 2026-07-24, got %s", got)
 	}
 }
 

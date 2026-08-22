@@ -65,11 +65,28 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 	if err != nil {
 		return err
 	}
-	startDate, err := resolveStartDate(ctx, st, options.StartDate, endDate)
+	dailyStart, err := resolveEntityStartDate(ctx, st, "daily_activity", options.StartDate, endDate)
 	if err != nil {
 		return err
 	}
-	if err := tracker.SetEffectiveRange(startDate.Format(dateLayout), endDate.Format(dateLayout)); err != nil {
+	sleepStart, err := resolveEntityStartDate(ctx, st, "sleep", options.StartDate, endDate)
+	if err != nil {
+		return err
+	}
+	rawStarts := make(map[string]time.Time)
+	effectiveStart := earlierDate(dailyStart, sleepStart)
+	for _, entity := range rawArchiveEntities() {
+		if _, ok := rawStarts[entity.kind]; ok {
+			continue
+		}
+		start, resolveErr := resolveEntityStartDate(ctx, st, entity.kind, options.StartDate, endDate)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		rawStarts[entity.kind] = start
+		effectiveStart = earlierDate(effectiveStart, start)
+	}
+	if err := tracker.SetEffectiveRange(effectiveStart.Format(dateLayout), endDate.Format(dateLayout)); err != nil {
 		return err
 	}
 
@@ -106,16 +123,16 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 		OnUnauthorized: onUnauthorized,
 	}
 
-	if err := syncDailyActivity(ctx, st, syncClient, activeConnection.AccessToken, startDate, endDate, fetchedAt, tracker, retry); err != nil {
+	if err := syncDailyActivity(ctx, st, syncClient, activeConnection.AccessToken, dailyStart, endDate, fetchedAt, tracker, retry); err != nil {
 		return err
 	}
-	if err := syncSleep(ctx, st, syncClient, activeConnection.AccessToken, startDate, endDate, fetchedAt, tracker, retry); err != nil {
+	if err := syncSleep(ctx, st, syncClient, activeConnection.AccessToken, sleepStart, endDate, fetchedAt, tracker, retry); err != nil {
 		return err
 	}
 	if err := syncSnapshots(ctx, st, syncClient, activeConnection.AccessToken, fetchedAt, tracker, retry); err != nil {
 		return err
 	}
-	if err := syncRawArchives(ctx, st, syncClient, activeConnection.AccessToken, startDate, endDate, fetchedAt, tracker, retry); err != nil {
+	if err := syncRawArchives(ctx, st, syncClient, activeConnection.AccessToken, rawStarts, endDate, fetchedAt, tracker, retry); err != nil {
 		return err
 	}
 	return nil
@@ -320,8 +337,9 @@ func syncSnapshots(ctx context.Context, st *store.Store, client *Client, accessT
 	return tracker.CompleteEntity("snapshots")
 }
 
-func syncRawArchives(ctx context.Context, st *store.Store, client *Client, accessToken string, start, end time.Time, fetchedAt string, tracker *providersync.Tracker, retry RetryConfig) error {
+func syncRawArchives(ctx context.Context, st *store.Store, client *Client, accessToken string, starts map[string]time.Time, end time.Time, fetchedAt string, tracker *providersync.Tracker, retry RetryConfig) error {
 	for _, entity := range rawArchiveEntities() {
+		start := starts[entity.kind]
 		chunks := dateChunks(start, end, 14)
 		if entity.query == rawQueryECG {
 			chunks = []dateChunk{{Start: start, End: end}}
@@ -703,11 +721,18 @@ func dateChunks(start, end time.Time, maxDays int) []dateChunk {
 	return out
 }
 
-func resolveStartDate(ctx context.Context, st *store.Store, requested string, end time.Time) (time.Time, error) {
+func resolveEntityStartDate(ctx context.Context, st *store.Store, entity, requested string, end time.Time) (time.Time, error) {
 	if strings.TrimSpace(requested) != "" {
-		return time.Parse(dateLayout, requested)
+		start, err := time.Parse(dateLayout, requested)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if start.After(end) {
+			start = end
+		}
+		return start, nil
 	}
-	cursor, _, err := st.SyncState(ctx, Provider, "daily_activity")
+	cursor, _, err := st.SyncState(ctx, Provider, entity)
 	if err == nil {
 		if parsed, parseErr := time.Parse(dateLayout, cursor); parseErr == nil {
 			start := parsed.AddDate(0, 0, -defaultIncrementalOverlap)
@@ -720,6 +745,13 @@ func resolveStartDate(ctx context.Context, st *store.Store, requested string, en
 		return time.Time{}, err
 	}
 	return end.AddDate(0, 0, -defaultBootstrapDays+1), nil
+}
+
+func earlierDate(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }
 
 func resolveEndDate(requested string) (time.Time, error) {
