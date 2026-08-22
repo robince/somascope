@@ -37,6 +37,7 @@
   let dashboard: DashboardOverview | null = null;
   let providers: ProviderSettings[] = [];
   let providerStatus: Partial<Record<ProviderName, ProviderStatus | null>> = {};
+  let providerStatusErrors: Partial<Record<ProviderName, string>> = {};
   let providerRecent: Partial<Record<ProviderName, ProviderRecent>> = {};
   let providerBusy: Partial<Record<ProviderName, boolean>> = {};
   let userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -238,21 +239,37 @@
   async function loadAllProviderStatus() {
     statusLoading = true;
     statusError = "";
-    try {
-      await Promise.all(PROVIDER_NAMES.map((provider) => loadProviderStatus(provider)));
-    } catch (err) {
-      statusError = messageForError(err);
-      stopStatusPolling();
-    } finally {
-      statusLoading = false;
+    const results = await Promise.allSettled(
+      PROVIDER_NAMES.map(async (provider) => {
+        const status = await fetchJSON<ProviderStatus>(
+          `/api/v1/providers/${provider}/status`,
+          `Failed to refresh ${providerLabel(provider)} sync status.`
+        );
+        return [provider, status] as const;
+      })
+    );
+    const failures: Partial<Record<ProviderName, string>> = {};
+    for (const [index, result] of results.entries()) {
+      const provider = PROVIDER_NAMES[index];
+      if (result.status === "fulfilled") {
+        applyProviderStatus(result.value[1]);
+      } else {
+        failures[provider] = messageForError(result.reason);
+      }
     }
+    providerStatusErrors = failures;
+    statusError = Object.values(failures).join(" ");
+    if (Object.keys(failures).length === PROVIDER_NAMES.length) {
+      stopStatusPolling();
+    }
+    statusLoading = false;
   }
 
   async function loadAllProviderRecent() {
     recentLoading = true;
     recentError = "";
     try {
-      const entries = await Promise.all(
+      const results = await Promise.allSettled(
         PROVIDER_NAMES.map(async (provider) => {
           const payload = await fetchJSON<ProviderRecent>(
             `/api/v1/providers/${provider}/recent`,
@@ -261,10 +278,19 @@
           return [provider, payload] as const;
         })
       );
-      providerRecent = Object.fromEntries(entries);
+      const next: Partial<Record<ProviderName, ProviderRecent>> = {};
+      const failures: string[] = [];
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          next[result.value[0]] = result.value[1];
+        } else {
+          failures.push(messageForError(result.reason));
+        }
+      }
+      providerRecent = next;
+      recentError = failures.join(" ");
     } catch (err) {
       recentError = messageForError(err);
-      providerRecent = {};
     } finally {
       recentLoading = false;
     }
@@ -616,6 +642,7 @@
       loading={settingsLoading}
       {statusLoading}
       statusError={statusError}
+      statusErrors={providerStatusErrors}
       {saving}
       {syncStartDate}
       {dirty}

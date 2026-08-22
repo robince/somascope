@@ -11,6 +11,7 @@
   export let loading = false;
   export let statusLoading = false;
   export let statusError = "";
+  export let statusErrors: Partial<Record<ProviderName, string>> = {};
   export let saving = false;
   export let syncStartDate = "";
   export let dirty = false;
@@ -127,9 +128,10 @@
       <dl class="stack">
         {#each providers as provider}
           {@const status = statuses[provider.provider]}
+          {@const providerStatusError = statusErrors[provider.provider] ?? ""}
           <div class="stack-row">
             <dt>{providerLabel(provider.provider)}</dt>
-            <dd>{connectionLabel(status, statusLoading, statusError)} · {status?.daily_record_count ?? 0} days</dd>
+            <dd>{connectionLabel(status, statusLoading, providerStatusError)} · {status?.daily_record_count ?? 0} days</dd>
           </div>
         {/each}
       </dl>
@@ -138,6 +140,7 @@
 
   {#each providers as provider}
   {@const status = statuses[provider.provider]}
+  {@const providerStatusError = statusErrors[provider.provider] ?? ""}
   {@const providerBusy = Boolean(busy[provider.provider])}
   <article class="panel sync-panel" id={`${provider.provider}-sync`}>
     <div class="section-head">
@@ -149,9 +152,9 @@
 
     {#if statusLoading}
       <p class="status-copy">Checking local {providerLabel(provider.provider)} connection status...</p>
-    {:else if statusError}
+    {:else if providerStatusError}
       <p class="status-copy error">
-        {providerLabel(provider.provider)} status could not be loaded from the local app. {statusError}
+        {providerLabel(provider.provider)} status could not be loaded from the local app. {providerStatusError}
       </p>
     {:else if !status?.connected}
       <p class="status-copy warning">
@@ -324,6 +327,7 @@
       <div class="provider-grid">
         {#each providers as provider, index}
           {@const status = statuses[provider.provider]}
+          {@const providerStatusError = statusErrors[provider.provider] ?? ""}
           {@const providerBusy = Boolean(busy[provider.provider])}
           <article class="provider-card">
             <div class="provider-head">
@@ -476,7 +480,7 @@
 
               {#if statusLoading}
                 <p class="status-copy">Checking stored {providerLabel(provider.provider)} connection...</p>
-              {:else if statusError}
+              {:else if providerStatusError}
                 <p class="status-copy warning">Connection status is currently unavailable. Use Refresh status to re-check the local app.</p>
               {:else if !provider.configured}
                 <p class="status-copy warning">Save your local client ID and secret before connecting.</p>
