@@ -39,6 +39,16 @@ func TestClientReusesRefreshedTokenAcrossRequests(t *testing.T) {
 	}
 }
 
+func TestFetchCollectionPagesRejectsRepeatedToken(t *testing.T) {
+	client := NewClient(&http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return testJSONResponse(http.StatusOK, `{"data":[],"next_token":"same-token"}`), nil
+	})})
+	_, err := client.FetchCollectionPages(context.Background(), "token", "/collection", nil, RetryConfig{MaxAttempts: 1})
+	if err == nil || !strings.Contains(err.Error(), "repeated next token") {
+		t.Fatalf("expected repeated-token error, got %v", err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
