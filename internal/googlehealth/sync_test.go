@@ -125,7 +125,7 @@ func TestFilterECGPagesHonorsRequestedEndDate(t *testing.T) {
 			point("2026-08-21T12:00:00Z"),
 			point("2026-08-22T12:00:00Z"),
 		},
-		RawBody: json.RawMessage(`{"dataPoints":[{"electrocardiogram":{"interval":{"startTime":"2026-08-20T12:00:00Z"}}},{"electrocardiogram":{"interval":{"startTime":"2026-08-21T12:00:00Z"}}},{"electrocardiogram":{"interval":{"startTime":"2026-08-22T12:00:00Z"}}}],"nextPageToken":""}`),
+		RawBody: json.RawMessage(`{"dataPoints":[{"electrocardiogram":{"interval":{"startTime":"2026-08-20T12:00:00Z"}}},{"electrocardiogram":{"interval":{"startTime":"2026-08-21T12:00:00Z"}}},{"electrocardiogram":{"interval":{"startTime":"2026-08-22T12:00:00Z"}}}],"nextPageToken":"","totalSize":9007199254740993}`),
 	}}
 
 	start, _ := time.Parse(dateLayout, "2026-08-20")
@@ -145,6 +145,9 @@ func TestFilterECGPagesHonorsRequestedEndDate(t *testing.T) {
 	}
 	if got := len(raw.DataPoints); got != 2 {
 		t.Fatalf("expected raw payload to contain 2 in-range points, got %d", got)
+	}
+	if !strings.Contains(string(filtered[0].RawBody), `"totalSize":9007199254740993`) {
+		t.Fatalf("expected large numeric text to be preserved, got %s", filtered[0].RawBody)
 	}
 }
 

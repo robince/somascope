@@ -1,6 +1,7 @@
 package googlehealth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -412,7 +413,9 @@ func filterECGPages(pages []ListPage, start, end time.Time) ([]ListPage, error) 
 			filtered = append(filtered, point)
 		}
 		var rawPayload map[string]any
-		if err := json.Unmarshal(pages[pageIndex].RawBody, &rawPayload); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(pages[pageIndex].RawBody))
+		decoder.UseNumber()
+		if err := decoder.Decode(&rawPayload); err != nil {
 			return nil, fmt.Errorf("decode ECG response for range filtering: %w", err)
 		}
 		rawPayload["dataPoints"] = filtered
