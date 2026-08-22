@@ -15,6 +15,8 @@ import (
 
 type Task func(context.Context, *Tracker) error
 
+var ErrProviderSyncActive = errors.New("provider sync is active")
+
 type Manager struct {
 	store     *store.Store
 	mu        sync.Mutex
@@ -47,6 +49,23 @@ func NewManager(st *store.Store) (*Manager, error) {
 
 func (m *Manager) Shutdown() {
 	m.cancelAll()
+}
+
+// WithProviderIdle serializes provider connection changes with sync startup.
+// The callback runs only when the provider has no active sync.
+func (m *Manager) WithProviderIdle(provider string, fn func() error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_, err := m.store.CurrentSyncRunByProvider(context.Background(), provider)
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w for %s", ErrProviderSyncActive, provider)
+	case !errors.Is(err, store.ErrNotFound):
+		return err
+	default:
+		return fn()
+	}
 }
 
 func (m *Manager) Start(provider, mode, requestedStartDate, requestedEndDate string, task Task) (store.SyncRun, bool, error) {

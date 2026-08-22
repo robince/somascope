@@ -151,18 +151,27 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	connection, err := s.completeProviderAuth(r.Context(), provider, cfg, code)
+	var connection store.Connection
+	err = s.syncs.WithProviderIdle(provider, func() error {
+		var authErr error
+		connection, authErr = s.completeProviderAuth(r.Context(), provider, cfg, code)
+		if authErr != nil {
+			return authErr
+		}
+		if authErr = s.validateAccountReconnect(r.Context(), connection); authErr != nil {
+			return authErr
+		}
+		if authErr = s.store.UpsertConnection(r.Context(), connection); authErr != nil {
+			return fmt.Errorf("save connection: %w", authErr)
+		}
+		return nil
+	})
+	if errors.Is(err, providersync.ErrProviderSyncActive) {
+		writeOAuthHTML(w, providerDisplayName(provider)+" authorization paused", "Wait for the active sync to finish, then restart the connection flow.")
+		return
+	}
 	if err != nil {
 		writeOAuthHTML(w, providerDisplayName(provider)+" authorization failed", templateEscape(err.Error()))
-		return
-	}
-	if err := s.validateAccountReconnect(r.Context(), connection); err != nil {
-		writeOAuthHTML(w, providerDisplayName(provider)+" authorization failed", templateEscape(err.Error()))
-		return
-	}
-
-	if err := s.store.UpsertConnection(r.Context(), connection); err != nil {
-		http.Error(w, "failed to save connection", http.StatusInternalServerError)
 		return
 	}
 
