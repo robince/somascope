@@ -98,6 +98,11 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 	}
 
 	var tokenMu sync.Mutex
+	currentAccessToken := func() string {
+		tokenMu.Lock()
+		defer tokenMu.Unlock()
+		return activeConnection.AccessToken
+	}
 	onUnauthorized := func(ctx context.Context, staleToken string) (string, error) {
 		tokenMu.Lock()
 		defer tokenMu.Unlock()
@@ -123,8 +128,9 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 
 	fetchedAt := time.Now().UTC().Format(time.RFC3339)
 	retry := RetryConfig{
-		MaxAttempts:    defaultRetryAttempts,
-		OnUnauthorized: onUnauthorized,
+		MaxAttempts:        defaultRetryAttempts,
+		OnUnauthorized:     onUnauthorized,
+		CurrentAccessToken: currentAccessToken,
 	}
 
 	if err := syncDailyActivity(ctx, st, syncClient, activeConnection.AccessToken, dailyStart, endDate, fetchedAt, tracker, retry); err != nil {

@@ -101,6 +101,11 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 	// Token refresh callback for mid-sync 401 handling.
 	// Protected by mutex so concurrent goroutines don't trigger multiple refreshes.
 	var tokenMu sync.Mutex
+	currentAccessToken := func() string {
+		tokenMu.Lock()
+		defer tokenMu.Unlock()
+		return activeConnection.AccessToken
+	}
 	onUnauthorized := func(ctx context.Context, staleToken string) (string, error) {
 		tokenMu.Lock()
 		defer tokenMu.Unlock()
@@ -150,7 +155,7 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 		if entity.queryMode != queryModeNone {
 			continue
 		}
-		if err := syncEntityNoRange(ctx, st, syncClient, activeConnection.AccessToken, fetchedAt, entity, tracker, onUnauthorized); err != nil {
+		if err := syncEntityNoRange(ctx, st, syncClient, activeConnection.AccessToken, fetchedAt, entity, tracker, onUnauthorized, currentAccessToken); err != nil {
 			return err
 		}
 	}
@@ -183,7 +188,7 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := syncEntityRange(syncCtx, st, syncClient, activeConnection.AccessToken, fetchedAt, job.entity, job.startDate, endDate, tracker, onUnauthorized); err != nil {
+			if err := syncEntityRange(syncCtx, st, syncClient, activeConnection.AccessToken, fetchedAt, job.entity, job.startDate, endDate, tracker, onUnauthorized, currentAccessToken); err != nil {
 				errOnce.Do(func() {
 					firstErr = err
 					cancel()
@@ -217,7 +222,7 @@ func syncEntities() []syncEntity {
 	}
 }
 
-func syncEntityNoRange(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error)) error {
+func syncEntityNoRange(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error), currentAccessToken func() string) error {
 	if err := tracker.StartEntity(entity.kind, "", "", 1); err != nil {
 		return err
 	}
@@ -233,9 +238,10 @@ func syncEntityNoRange(ctx context.Context, st *store.Store, client *Client, acc
 	case "personal_info":
 		var result DocumentResult
 		result, err = client.FetchDocumentResult(ctx, accessToken, entity.featurePath, RetryConfig{
-			MaxAttempts:    defaultRetryAttempts,
-			OnRetry:        retryCallback(tracker, entity, "", ""),
-			OnUnauthorized: onUnauthorized,
+			MaxAttempts:        defaultRetryAttempts,
+			OnRetry:            retryCallback(tracker, entity, "", ""),
+			OnUnauthorized:     onUnauthorized,
+			CurrentAccessToken: currentAccessToken,
 		})
 		if err == nil {
 			if _, archiveErr := archiveRawResponse(ctx, st, entity, syncRequestWindow{}, result.RawBody, fetchedAt, nil); archiveErr != nil {
@@ -247,9 +253,10 @@ func syncEntityNoRange(ctx context.Context, st *store.Store, client *Client, acc
 		}
 	default:
 		pages, pageErr := client.FetchCollectionPages(ctx, accessToken, entity.featurePath, nil, RetryConfig{
-			MaxAttempts:    defaultRetryAttempts,
-			OnRetry:        retryCallback(tracker, entity, "", ""),
-			OnUnauthorized: onUnauthorized,
+			MaxAttempts:        defaultRetryAttempts,
+			OnRetry:            retryCallback(tracker, entity, "", ""),
+			OnUnauthorized:     onUnauthorized,
+			CurrentAccessToken: currentAccessToken,
 		})
 		err = pageErr
 		if err == nil {
@@ -286,7 +293,7 @@ func syncEntityNoRange(ctx context.Context, st *store.Store, client *Client, acc
 	return tracker.CompleteEntity(entity.kind)
 }
 
-func syncEntityRange(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error)) error {
+func syncEntityRange(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error), currentAccessToken func() string) error {
 	if startDate.After(endDate) {
 		startDate = endDate
 	}
@@ -296,11 +303,11 @@ func syncEntityRange(ctx context.Context, st *store.Store, client *Client, acces
 	}
 
 	if entity.sparseProbe {
-		return syncSparseEntityRange(ctx, st, client, accessToken, fetchedAt, entity, startDate, endDate, tracker, onUnauthorized)
+		return syncSparseEntityRange(ctx, st, client, accessToken, fetchedAt, entity, startDate, endDate, tracker, onUnauthorized, currentAccessToken)
 	}
 
 	for day := startDate; !day.After(endDate); day = day.AddDate(0, 0, 1) {
-		if err := syncEntityDay(ctx, st, client, accessToken, fetchedAt, entity, day, tracker, onUnauthorized); err != nil {
+		if err := syncEntityDay(ctx, st, client, accessToken, fetchedAt, entity, day, tracker, onUnauthorized, currentAccessToken); err != nil {
 			return err
 		}
 	}
@@ -308,31 +315,32 @@ func syncEntityRange(ctx context.Context, st *store.Store, client *Client, acces
 	return tracker.CompleteEntity(entity.kind)
 }
 
-func syncSparseEntityRange(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error)) error {
+func syncSparseEntityRange(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error), currentAccessToken func() string) error {
 	for blockStart := startDate; !blockStart.After(endDate); blockStart = blockStart.AddDate(0, 0, defaultSparseProbeDays) {
 		blockEnd := minDate(endDate, blockStart.AddDate(0, 0, defaultSparseProbeDays-1))
-		if err := syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, blockStart, blockEnd, tracker, onUnauthorized); err != nil {
+		if err := syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, blockStart, blockEnd, tracker, onUnauthorized, currentAccessToken); err != nil {
 			return err
 		}
 	}
 	return tracker.CompleteEntity(entity.kind)
 }
 
-func syncSparseProbeBlock(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error)) error {
+func syncSparseProbeBlock(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error), currentAccessToken func() string) error {
 	if startDate.After(endDate) {
 		return nil
 	}
 	if startDate.Equal(endDate) {
-		return syncEntityDay(ctx, st, client, accessToken, fetchedAt, entity, startDate, tracker, onUnauthorized)
+		return syncEntityDay(ctx, st, client, accessToken, fetchedAt, entity, startDate, tracker, onUnauthorized, currentAccessToken)
 	}
 
 	chunkStart := startDate.Format(dateLayout)
 	chunkEnd := endDate.Format(dateLayout)
 	window := inclusiveDateSpanWindow(startDate, endDate)
 	pages, err := client.FetchCollectionPages(ctx, accessToken, entity.featurePath, window.params, RetryConfig{
-		MaxAttempts:    defaultRetryAttempts,
-		OnRetry:        retryCallback(tracker, entity, chunkStart, chunkEnd),
-		OnUnauthorized: onUnauthorized,
+		MaxAttempts:        defaultRetryAttempts,
+		OnRetry:            retryCallback(tracker, entity, chunkStart, chunkEnd),
+		OnUnauthorized:     onUnauthorized,
+		CurrentAccessToken: currentAccessToken,
 	})
 	if err != nil {
 		return failEntity(tracker, entity, chunkStart, chunkEnd, "fetch_collection", err)
@@ -345,10 +353,10 @@ func syncSparseProbeBlock(ctx context.Context, st *store.Store, client *Client, 
 	leftCount := dayCount / 2
 	leftEnd := startDate.AddDate(0, 0, leftCount-1)
 	rightStart := leftEnd.AddDate(0, 0, 1)
-	if err := syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, startDate, leftEnd, tracker, onUnauthorized); err != nil {
+	if err := syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, startDate, leftEnd, tracker, onUnauthorized, currentAccessToken); err != nil {
 		return err
 	}
-	return syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, rightStart, endDate, tracker, onUnauthorized)
+	return syncSparseProbeBlock(ctx, st, client, accessToken, fetchedAt, entity, rightStart, endDate, tracker, onUnauthorized, currentAccessToken)
 }
 
 func skipSparseRange(ctx context.Context, st *store.Store, fetchedAt string, entity syncEntity, startDate, endDate time.Time, tracker *providersync.Tracker) error {
@@ -371,7 +379,7 @@ func skipSparseRange(ctx context.Context, st *store.Store, fetchedAt string, ent
 	return nil
 }
 
-func syncEntityDay(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, day time.Time, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error)) error {
+func syncEntityDay(ctx context.Context, st *store.Store, client *Client, accessToken, fetchedAt string, entity syncEntity, day time.Time, tracker *providersync.Tracker, onUnauthorized func(context.Context, string) (string, error), currentAccessToken func() string) error {
 	window := entity.requestWindow(day)
 	chunkLabel := window.logicalDate
 	if chunkLabel == "" {
@@ -382,9 +390,10 @@ func syncEntityDay(ctx context.Context, st *store.Store, client *Client, accessT
 	}
 
 	pages, err := client.FetchCollectionPages(ctx, accessToken, entity.featurePath, window.params, RetryConfig{
-		MaxAttempts:    defaultRetryAttempts,
-		OnRetry:        retryCallback(tracker, entity, chunkLabel, chunkLabel),
-		OnUnauthorized: onUnauthorized,
+		MaxAttempts:        defaultRetryAttempts,
+		OnRetry:            retryCallback(tracker, entity, chunkLabel, chunkLabel),
+		OnUnauthorized:     onUnauthorized,
+		CurrentAccessToken: currentAccessToken,
 	})
 	if err != nil {
 		return failEntity(tracker, entity, chunkLabel, chunkLabel, "fetch_collection", err)

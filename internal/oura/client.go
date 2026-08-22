@@ -41,9 +41,10 @@ type Client struct {
 }
 
 type RetryConfig struct {
-	MaxAttempts    int
-	OnRetry        func(*APIError, time.Duration)
-	OnUnauthorized func(ctx context.Context, staleToken string) (string, error)
+	MaxAttempts        int
+	OnRetry            func(*APIError, time.Duration)
+	OnUnauthorized     func(ctx context.Context, staleToken string) (string, error)
+	CurrentAccessToken func() string
 }
 
 type CollectionPage struct {
@@ -316,9 +317,19 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 	}
 
 	currentToken := accessToken
+	if retry.CurrentAccessToken != nil {
+		if token := retry.CurrentAccessToken(); token != "" {
+			currentToken = token
+		}
+	}
 	refreshed := false
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if retry.CurrentAccessToken != nil {
+			if token := retry.CurrentAccessToken(); token != "" {
+				currentToken = token
+			}
+		}
 		reqURL := APIBaseURL + path
 		if len(params) > 0 {
 			reqURL += "?" + params.Encode()
