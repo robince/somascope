@@ -50,7 +50,14 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 				Message:    fmt.Sprintf("refresh Google Health token: %v", err),
 			})
 		}
-		applyToken(ctx, st, &activeConnection, refreshed)
+		if err := applyToken(ctx, st, &activeConnection, refreshed); err != nil {
+			return tracker.Fail("oauth", &store.SyncError{
+				At:         nowRFC3339(),
+				EntityKind: "oauth",
+				Operation:  "persist_refreshed_token",
+				Message:    fmt.Sprintf("save refreshed Google Health token: %v", err),
+			})
+		}
 	}
 
 	endDate, err := resolveEndDate(options.EndDate)
@@ -86,7 +93,9 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 			_ = markNeedsReauth(ctx, st, activeConnection)
 			return "", err
 		}
-		applyToken(ctx, st, &activeConnection, refreshed)
+		if err := applyToken(ctx, st, &activeConnection, refreshed); err != nil {
+			return "", fmt.Errorf("save refreshed Google Health token: %w", err)
+		}
 		return activeConnection.AccessToken, nil
 	}
 
@@ -760,7 +769,7 @@ func failEntity(tracker *providersync.Tracker, entity string, chunk dateChunk, o
 	return err
 }
 
-func applyToken(ctx context.Context, st *store.Store, connection *store.Connection, bundle TokenBundle) {
+func applyToken(ctx context.Context, st *store.Store, connection *store.Connection, bundle TokenBundle) error {
 	connection.AccessToken = bundle.AccessToken
 	if bundle.RefreshToken != "" {
 		connection.RefreshToken = bundle.RefreshToken
@@ -770,7 +779,7 @@ func applyToken(ctx context.Context, st *store.Store, connection *store.Connecti
 		connection.TokenExpiresAt = bundle.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	connection.Status = "connected"
-	_ = st.UpsertConnection(ctx, *connection)
+	return st.UpsertConnection(ctx, *connection)
 }
 
 func markNeedsReauth(ctx context.Context, st *store.Store, connection store.Connection) error {
