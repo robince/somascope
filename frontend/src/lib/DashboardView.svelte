@@ -23,7 +23,7 @@
     ProviderStatus,
     RawExportOptions
   } from "./types";
-  import { providerLabel, providerSubtitle } from "./types";
+  import { PROVIDER_NAMES, providerLabel, providerSubtitle } from "./types";
 
   export let dashboard: DashboardOverview | null = null;
   export let activePeriod: PeriodId = "1m";
@@ -220,7 +220,7 @@
     .filter((value): value is string => Boolean(value))
     .sort()
     .at(-1);
-  $: syncStatusLabel = (["oura", "google_health"] as const)
+  $: syncStatusLabel = PROVIDER_NAMES
     .map((provider) => {
       const status = statuses[provider];
       if (!status?.connected && !status?.configured) {

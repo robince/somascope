@@ -14,7 +14,7 @@
     ProviderStatus,
     SettingsPayload
   } from "./lib/types";
-  import { providerLabel } from "./lib/types";
+  import { PROVIDER_NAMES, providerLabel } from "./lib/types";
 
   const PROVIDER_DEFAULTS: Record<ProviderSettings["provider"], Omit<ProviderSettings, "configured" | "client_secret">> = {
     google_health: {
@@ -239,7 +239,7 @@
     statusLoading = true;
     statusError = "";
     try {
-      await Promise.all((["oura", "google_health"] as const).map((provider) => loadProviderStatus(provider)));
+      await Promise.all(PROVIDER_NAMES.map((provider) => loadProviderStatus(provider)));
     } catch (err) {
       statusError = messageForError(err);
       stopStatusPolling();
@@ -253,7 +253,7 @@
     recentError = "";
     try {
       const entries = await Promise.all(
-        (["oura", "google_health"] as const).map(async (provider) => {
+        PROVIDER_NAMES.map(async (provider) => {
           const payload = await fetchJSON<ProviderRecent>(
             `/api/v1/providers/${provider}/recent`,
             `Failed to load recent ${providerLabel(provider)} data.`

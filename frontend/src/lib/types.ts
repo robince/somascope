@@ -13,6 +13,8 @@ export type AppInfo = {
 
 export type ProviderName = "oura" | "google_health";
 
+export const PROVIDER_NAMES = ["oura", "google_health"] as const satisfies readonly ProviderName[];
+
 export const PROVIDER_LABELS: Record<ProviderName, string> = {
   oura: "Oura",
   google_health: "Google Health"
@@ -215,9 +217,9 @@ export type DashboardOverview = {
   earliest_date?: string;
   latest_date?: string;
   available_days: number;
-  providers: string[];
-  connected_providers?: string[];
-  available_sources?: string[];
+  providers: ProviderName[];
+  connected_providers?: ProviderName[];
+  available_sources?: ProviderName[];
   export_urls: {
     canonical_jsonl: string;
     canonical_csv: string;
