@@ -23,6 +23,7 @@ const (
 	APIBaseURL   = "https://health.googleapis.com/v4"
 	Provider     = "google_health"
 	maxPageSize  = 10000
+	maxPages     = 500
 )
 
 func DefaultReadonlyScopes() []string {
@@ -302,38 +303,18 @@ func (c *Client) DailyRollup(ctx context.Context, accessToken, dataType string, 
 }
 
 func (c *Client) ListDataPoints(ctx context.Context, accessToken, dataType string, params url.Values, retry RetryConfig) ([]ListPage, error) {
-	var out []ListPage
-	pageToken := ""
-	for {
-		pageParams := withPageSize(params)
-		if pageToken != "" {
-			pageParams.Set("pageToken", pageToken)
-		}
-		var payload struct {
-			DataPoints    []map[string]any `json:"dataPoints"`
-			NextPageToken string           `json:"nextPageToken"`
-		}
-		raw, err := c.doJSON(ctx, http.MethodGet, accessToken, "/users/me/dataTypes/"+dataType+"/dataPoints", pageParams, nil, &payload, retry)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, ListPage{
-			DataPoints:    payload.DataPoints,
-			NextPageToken: strings.TrimSpace(payload.NextPageToken),
-			RawBody:       raw,
-		})
-		pageToken = strings.TrimSpace(payload.NextPageToken)
-		if pageToken == "" {
-			break
-		}
-	}
-	return out, nil
+	return c.listPaged(ctx, accessToken, "/users/me/dataTypes/"+dataType+"/dataPoints", params, retry)
 }
 
 func (c *Client) ReconcileDataPoints(ctx context.Context, accessToken, dataType string, params url.Values, retry RetryConfig) ([]ListPage, error) {
+	return c.listPaged(ctx, accessToken, "/users/me/dataTypes/"+dataType+"/dataPoints:reconcile", params, retry)
+}
+
+func (c *Client) listPaged(ctx context.Context, accessToken, path string, params url.Values, retry RetryConfig) ([]ListPage, error) {
 	var out []ListPage
+	seen := map[string]struct{}{}
 	pageToken := ""
-	for {
+	for page := 0; page < maxPages; page++ {
 		pageParams := withPageSize(params)
 		if pageToken != "" {
 			pageParams.Set("pageToken", pageToken)
@@ -342,21 +323,26 @@ func (c *Client) ReconcileDataPoints(ctx context.Context, accessToken, dataType 
 			DataPoints    []map[string]any `json:"dataPoints"`
 			NextPageToken string           `json:"nextPageToken"`
 		}
-		raw, err := c.doJSON(ctx, http.MethodGet, accessToken, "/users/me/dataTypes/"+dataType+"/dataPoints:reconcile", pageParams, nil, &payload, retry)
+		raw, err := c.doJSON(ctx, http.MethodGet, accessToken, path, pageParams, nil, &payload, retry)
 		if err != nil {
 			return nil, err
 		}
+		next := strings.TrimSpace(payload.NextPageToken)
 		out = append(out, ListPage{
 			DataPoints:    payload.DataPoints,
-			NextPageToken: strings.TrimSpace(payload.NextPageToken),
+			NextPageToken: next,
 			RawBody:       raw,
 		})
-		pageToken = strings.TrimSpace(payload.NextPageToken)
-		if pageToken == "" {
-			break
+		if next == "" {
+			return out, nil
 		}
+		if _, ok := seen[next]; ok {
+			return nil, fmt.Errorf("google health api %s returned a repeated page token", path)
+		}
+		seen[next] = struct{}{}
+		pageToken = next
 	}
-	return out, nil
+	return nil, fmt.Errorf("google health api %s exceeded %d pages", path, maxPages)
 }
 
 func (c *Client) doJSON(ctx context.Context, method, accessToken, path string, params url.Values, body any, target any, retry RetryConfig) (json.RawMessage, error) {
