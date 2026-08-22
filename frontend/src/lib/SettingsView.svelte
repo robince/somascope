@@ -450,7 +450,7 @@
                   class="button button-ghost"
                   type="button"
                   onclick={onRefresh}
-                  disabled={loading || saving || providerBusy}
+                  disabled={loading || saving}
                 >
                   Refresh status
                 </button>
