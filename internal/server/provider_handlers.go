@@ -487,6 +487,9 @@ func (s *Server) completeProviderAuth(ctx context.Context, provider string, cfg 
 		if err != nil {
 			return store.Connection{}, err
 		}
+		if strings.TrimSpace(identity.HealthUserID) == "" {
+			return store.Connection{}, fmt.Errorf("google Health account identity response did not include a health user id")
+		}
 		expiresAt := ""
 		if !bundle.ExpiresAt.IsZero() {
 			expiresAt = bundle.ExpiresAt.UTC().Format(time.RFC3339)
