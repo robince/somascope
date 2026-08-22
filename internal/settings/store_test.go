@@ -237,3 +237,32 @@ func TestLoadMigratesLegacyFitbitCredentials(t *testing.T) {
 		t.Fatalf("expected legacy notes to be preserved, got %q", private.Notes)
 	}
 }
+
+func TestLoadDoesNotOverwritePartialGoogleHealthSettingsDuringFitbitMigration(t *testing.T) {
+	app, err := appstore.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer app.Close()
+
+	for _, credential := range []appstore.ProviderCredential{
+		{Provider: "fitbit", ClientID: "legacy-fitbit-client", ClientSecret: "legacy-fitbit-secret", RedirectURI: "http://localhost:18080/oauth/fitbit/callback"},
+		{Provider: "google_health", ClientID: "google-client", RedirectURI: "http://localhost:18080/oauth/google_health/callback", DefaultScopes: "custom.readonly", Notes: "custom notes"},
+	} {
+		if err := app.UpsertProviderCredential(context.Background(), credential); err != nil {
+			t.Fatalf("seed %s credential: %v", credential.Provider, err)
+		}
+	}
+
+	store := NewStore(app)
+	if _, err := store.Load(); err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	googleHealth, err := store.Provider("google_health")
+	if err != nil {
+		t.Fatalf("load Google Health settings: %v", err)
+	}
+	if googleHealth.ClientID != "google-client" || googleHealth.DefaultScopes != "custom.readonly" || googleHealth.Notes != "custom notes" {
+		t.Fatalf("partial Google Health settings were overwritten: %#v", googleHealth)
+	}
+}

@@ -192,11 +192,11 @@ func (s *Store) migrateLegacyFitbitCredentials(ctx context.Context) error {
 		return nil
 	}
 
-	current, err := s.app.ProviderCredentialByProvider(ctx, "google_health")
+	_, err = s.app.ProviderCredentialByProvider(ctx, "google_health")
 	if err != nil && !errors.Is(err, appstore.ErrNotFound) {
 		return err
 	}
-	if err == nil && providerConfigured(current) {
+	if err == nil {
 		return nil
 	}
 
