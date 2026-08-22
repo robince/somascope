@@ -116,13 +116,13 @@ func syncDailyActivity(ctx context.Context, st *store.Store, client *Client, acc
 		return err
 	}
 
-	byDate := map[string]map[string]any{}
 	for _, chunk := range chunks {
 		if err := tracker.StartChunk("daily_activity", chunk.Start.Format(dateLayout), chunk.End.Format(dateLayout)); err != nil {
 			return err
 		}
 
 		rowsWritten := 0
+		byDate := map[string]map[string]any{}
 		for _, dataType := range []string{"steps", "active-energy-burned", "total-calories", "distance", "active-minutes", "sedentary-period"} {
 			page, err := client.DailyRollup(ctx, accessToken, dataType, chunk.Start, chunk.End, retryWith(retry, tracker, "daily_activity", chunk))
 			if err != nil {
@@ -140,7 +140,6 @@ func syncDailyActivity(ctx context.Context, st *store.Store, client *Client, acc
 					byDate[date] = map[string]any{"day": date}
 				}
 				mergeActivityPoint(byDate[date], dataType, point)
-				rowsWritten++
 			}
 		}
 
@@ -158,6 +157,7 @@ func syncDailyActivity(ctx context.Context, st *store.Store, client *Client, acc
 			}); err != nil {
 				return err
 			}
+			rowsWritten++
 		}
 
 		if err := tracker.CompleteChunk("daily_activity", chunk.End.Format(dateLayout), rowsWritten); err != nil {
