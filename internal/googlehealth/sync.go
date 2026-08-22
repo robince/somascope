@@ -671,7 +671,7 @@ func resolveStartDate(ctx context.Context, st *store.Store, requested string, en
 		if parsed, parseErr := time.Parse(dateLayout, cursor); parseErr == nil {
 			return parsed.AddDate(0, 0, -defaultIncrementalOverlap), nil
 		}
-	} else if err != nil && err != store.ErrNotFound {
+	} else if !errors.Is(err, store.ErrNotFound) {
 		return time.Time{}, err
 	}
 	return end.AddDate(0, 0, -defaultBootstrapDays+1), nil
