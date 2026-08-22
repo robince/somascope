@@ -176,7 +176,9 @@ func syncDailyActivity(ctx context.Context, st *store.Store, client *Client, acc
 		}
 	}
 
-	_ = st.UpsertSyncState(ctx, Provider, "daily_activity", end.Format(dateLayout), fetchedAt)
+	if err := advanceSyncState(ctx, st, "daily_activity", end.Format(dateLayout), fetchedAt); err != nil {
+		return failEntity(tracker, "daily_activity", dateChunk{Start: start, End: end}, "save_sync_state", err)
+	}
 	return tracker.CompleteEntity("daily_activity")
 }
 
@@ -221,7 +223,9 @@ func syncSleep(ctx context.Context, st *store.Store, client *Client, accessToken
 	if err := tracker.CompleteChunk("sleep", end.Format(dateLayout), rowsWritten); err != nil {
 		return err
 	}
-	_ = st.UpsertSyncState(ctx, Provider, "sleep", end.Format(dateLayout), fetchedAt)
+	if err := advanceSyncState(ctx, st, "sleep", end.Format(dateLayout), fetchedAt); err != nil {
+		return failEntity(tracker, "sleep", chunk, "save_sync_state", err)
+	}
 	return tracker.CompleteEntity("sleep")
 }
 
@@ -309,7 +313,9 @@ func syncSnapshots(ctx context.Context, st *store.Store, client *Client, accessT
 			return err
 		}
 	}
-	_ = st.UpsertSyncState(ctx, Provider, "snapshots", fetchedAt, fetchedAt)
+	if err := advanceSyncState(ctx, st, "snapshots", fetchedAt, fetchedAt); err != nil {
+		return failEntity(tracker, "snapshots", chunk, "save_sync_state", err)
+	}
 	return tracker.CompleteEntity("snapshots")
 }
 
@@ -367,7 +373,9 @@ func syncRawArchives(ctx context.Context, st *store.Store, client *Client, acces
 			_ = tracker.CompleteEntity(entity.kind)
 			continue
 		}
-		_ = st.UpsertSyncState(ctx, Provider, entity.kind, end.Format(dateLayout), fetchedAt)
+		if err := advanceSyncState(ctx, st, entity.kind, end.Format(dateLayout), fetchedAt); err != nil {
+			return failEntity(tracker, entity.kind, dateChunk{Start: start, End: end}, "save_sync_state", err)
+		}
 		if err := tracker.CompleteEntity(entity.kind); err != nil {
 			return err
 		}
@@ -729,6 +737,17 @@ func resolveEndDate(requested string) (time.Time, error) {
 	}
 	now := time.Now()
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC), nil
+}
+
+func advanceSyncState(ctx context.Context, st *store.Store, entity, nextCursor, fetchedAt string) error {
+	current, _, err := st.SyncState(ctx, Provider, entity)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if err == nil && current > nextCursor {
+		nextCursor = current
+	}
+	return st.UpsertSyncState(ctx, Provider, entity, nextCursor, fetchedAt)
 }
 
 func archiveRaw(ctx context.Context, st *store.Store, kind, key string, chunk dateChunk, payload json.RawMessage, fetchedAt string) (int64, error) {

@@ -168,6 +168,28 @@ func TestResolveStartDateClampsCursorOverlapToEnd(t *testing.T) {
 	}
 }
 
+func TestAdvanceSyncStateDoesNotRewindCursor(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.UpsertSyncState(context.Background(), Provider, "daily_activity", "2026-08-22", "2026-08-22T12:00:00Z"); err != nil {
+		t.Fatalf("seed sync state: %v", err)
+	}
+
+	if err := advanceSyncState(context.Background(), st, "daily_activity", "2026-08-10", "2026-08-23T12:00:00Z"); err != nil {
+		t.Fatalf("advance sync state: %v", err)
+	}
+	cursor, _, err := st.SyncState(context.Background(), Provider, "daily_activity")
+	if err != nil {
+		t.Fatalf("load sync state: %v", err)
+	}
+	if cursor != "2026-08-22" {
+		t.Fatalf("expected cursor to remain at 2026-08-22, got %q", cursor)
+	}
+}
+
 func TestSleepLocalDateUsesCivilOffsetNotUTC(t *testing.T) {
 	session, ok := sleepSessionFrom(map[string]any{
 		"sleep": map[string]any{
