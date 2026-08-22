@@ -18,7 +18,7 @@ func (s *Store) RecentDailyRecords(ctx context.Context, provider string, limit i
 	if err != nil {
 		return nil, fmt.Errorf("query recent daily records: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []DailyRecord
 	for rows.Next() {
@@ -60,7 +60,7 @@ func (s *Store) RecentSleepSessions(ctx context.Context, provider string, limit 
 	if err != nil {
 		return nil, fmt.Errorf("query recent sleep sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []SleepSession
 	for rows.Next() {

@@ -8,12 +8,21 @@ import (
 	appstore "github.com/robince/somascope/internal/store"
 )
 
+func cleanupStore(t *testing.T, closer interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+}
+
 func TestLoadReturnsSQLiteDefaultsWhenUnset(t *testing.T) {
 	app, err := appstore.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	store := NewStore(app)
 	value, err := store.Load()
@@ -52,7 +61,7 @@ func TestUpdatePersistsProviderCredentialsInSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	store := NewStore(app)
 	updated, err := store.Update(Settings{
@@ -122,7 +131,7 @@ func TestProviderNormalizesLegacyLoopbackRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	if err := app.UpsertProviderCredential(context.Background(), appstore.ProviderCredential{
 		Provider:      "oura",
@@ -151,7 +160,7 @@ func TestLoadNormalizesLegacyOuraScopeString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	if err := app.UpsertProviderCredential(context.Background(), appstore.ProviderCredential{
 		Provider:      "oura",
@@ -188,7 +197,7 @@ func TestLoadMigratesLegacyFitbitCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	if err := app.UpsertProviderCredential(context.Background(), appstore.ProviderCredential{
 		Provider:      "fitbit",
@@ -243,7 +252,7 @@ func TestLoadDoesNotOverwritePartialGoogleHealthSettingsDuringFitbitMigration(t 
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	for _, credential := range []appstore.ProviderCredential{
 		{Provider: "fitbit", ClientID: "legacy-fitbit-client", ClientSecret: "legacy-fitbit-secret", RedirectURI: "http://localhost:18080/oauth/fitbit/callback"},

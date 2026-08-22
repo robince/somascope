@@ -400,12 +400,14 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 		http.Error(w, "index.html missing", http.StatusInternalServerError)
 		return
 	}
-	defer file.Close()
-
 	data, err := io.ReadAll(file)
+	closeErr := file.Close()
 	if err != nil {
 		http.Error(w, "failed to read index.html", http.StatusInternalServerError)
 		return
+	}
+	if closeErr != nil {
+		log.Printf("warning: failed closing %s: %v", name, closeErr)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

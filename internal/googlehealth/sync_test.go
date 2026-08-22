@@ -15,6 +15,15 @@ import (
 	"github.com/robince/somascope/internal/store"
 )
 
+func cleanupStore(t *testing.T, closer interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+}
+
 func TestListDataPointsRequestsMaxPageSize(t *testing.T) {
 	var gotPageSize string
 	client := NewClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -287,7 +296,7 @@ func TestSyncNormalizesDailyActivityAndSleepAndArchivesHeartrate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	manager, err := providersync.NewManager(app)
 	if err != nil {

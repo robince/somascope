@@ -206,11 +206,13 @@ func (c *Client) tokenRequest(ctx context.Context, values url.Values) (TokenBund
 	if err != nil {
 		return TokenBundle{}, err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return TokenBundle{}, err
+	body, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return TokenBundle{}, readErr
+	}
+	if closeErr != nil {
+		return TokenBundle{}, closeErr
 	}
 	if resp.StatusCode >= 400 {
 		return TokenBundle{}, fmt.Errorf("oura token request failed: %s", strings.TrimSpace(string(body)))
@@ -352,9 +354,12 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 		}
 
 		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		closeErr := resp.Body.Close()
 		if readErr != nil {
 			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
 		}
 		if resp.StatusCode >= 400 {
 			apiErr := &APIError{

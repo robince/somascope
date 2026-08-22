@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+func cleanupStore(t *testing.T, closer interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+}
+
 func TestOpenAppliesInitialMigrations(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "somascope.db")
@@ -16,7 +25,7 @@ func TestOpenAppliesInitialMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	version, err := store.SchemaVersion(ctx)
 	if err != nil {
@@ -35,7 +44,7 @@ func TestCanonicalExportRowsIncludesRecordsAndSleep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	if err := store.UpsertDailyRecord(ctx, DailyRecord{
 		Provider:     "oura",
@@ -88,7 +97,7 @@ func TestRawExportRowsFiltersByProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	if _, err := store.UpsertRawDocument(ctx, RawDocument{
 		Provider:     "oura",
@@ -155,7 +164,7 @@ func TestRawExportRowsSupportsDateAndKindFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	for _, doc := range []RawDocument{
 		{
@@ -216,7 +225,7 @@ func TestMarkRunningSyncRunsInterruptedDoesNotDeadlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	if err := store.CreateSyncRun(ctx, SyncRun{
 		ID:        "sync_running",

@@ -233,11 +233,13 @@ func (c *Client) tokenRequest(ctx context.Context, values url.Values) (TokenBund
 	if err != nil {
 		return TokenBundle{}, err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return TokenBundle{}, err
+	body, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return TokenBundle{}, readErr
+	}
+	if closeErr != nil {
+		return TokenBundle{}, closeErr
 	}
 	if resp.StatusCode >= 400 {
 		return TokenBundle{}, fmt.Errorf("google token request failed: %s", truncate(strings.TrimSpace(string(body)), 512))
@@ -404,9 +406,12 @@ func (c *Client) doJSON(ctx context.Context, method, accessToken, path string, p
 		}
 
 		respBody, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		closeErr := resp.Body.Close()
 		if readErr != nil {
 			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
 		}
 		if resp.StatusCode >= 400 {
 			apiErr := &APIError{

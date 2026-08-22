@@ -191,7 +191,7 @@ func (s *Store) CanonicalExportRows(ctx context.Context) ([]CanonicalExportRow, 
 	if err != nil {
 		return nil, fmt.Errorf("query canonical export rows: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []CanonicalExportRow
 	for rows.Next() {
@@ -282,7 +282,7 @@ func (s *Store) RawExportOptions(ctx context.Context, provider string) (RawExpor
 	if err != nil {
 		return RawExportOptions{}, fmt.Errorf("query raw export document kinds: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var kind string
@@ -345,7 +345,7 @@ func (s *Store) RawExportRows(ctx context.Context, provider string, filter RawEx
 	if err != nil {
 		return nil, fmt.Errorf("query raw export rows: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []RawExportRow
 	for rows.Next() {

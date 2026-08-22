@@ -450,7 +450,7 @@ func (s *Server) completeProviderAuth(ctx context.Context, provider string, cfg 
 			return store.Connection{}, fmt.Errorf("read Google Health OAuth verifier: %w", err)
 		}
 		if strings.TrimSpace(verifier) == "" {
-			return store.Connection{}, fmt.Errorf("Google Health OAuth verifier is missing; restart the connection flow")
+			return store.Connection{}, fmt.Errorf("google health OAuth verifier is missing; restart the connection flow")
 		}
 		bundle, err := s.googleHealth.ExchangeCode(ctx, googlehealth.AppConfig{
 			ClientID:      cfg.ClientID,

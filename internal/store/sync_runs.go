@@ -194,7 +194,7 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 	for rows.Next() {
 		var run runningRun
 		if err := rows.Scan(&run.id, &run.provider); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		runs = append(runs, run)
@@ -209,7 +209,7 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	now := isoNow()
 	for _, item := range runs {
@@ -317,7 +317,7 @@ func (s *Store) SyncRunEntities(ctx context.Context, runID string) ([]SyncRunEnt
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []SyncRunEntity
 	for rows.Next() {

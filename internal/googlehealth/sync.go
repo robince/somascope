@@ -536,9 +536,7 @@ func parseDurationSeconds(value string) int {
 	if raw == "" {
 		return 0
 	}
-	if strings.HasSuffix(raw, "s") {
-		raw = strings.TrimSuffix(raw, "s")
-	}
+	raw = strings.TrimSuffix(raw, "s")
 	if parsed, err := strconv.Atoi(raw); err == nil {
 		return parsed
 	}
