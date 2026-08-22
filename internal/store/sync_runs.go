@@ -205,6 +205,11 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 
 	now := isoNow()
 	for _, item := range runs {
@@ -219,14 +224,14 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 				Message: message,
 			},
 		}
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE sync_runs
 			SET status = ?, updated_at = ?, finished_at = ?, last_error_json = ?
 			WHERE id = ?
 		`, run.Status, run.UpdatedAt, run.FinishedAt, mustJSONText(run.LastError), run.ID); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE sync_run_entities
 			SET
 				status = CASE WHEN status = 'running' THEN 'failed' ELSE status END,
@@ -240,7 +245,7 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) syncRunByQuery(ctx context.Context, query string, args ...any) (SyncRun, error) {
