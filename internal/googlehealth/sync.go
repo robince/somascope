@@ -128,7 +128,8 @@ func syncDailyActivity(ctx context.Context, st *store.Store, client *Client, acc
 			if err != nil {
 				return failEntity(tracker, "daily_activity", chunk, "dailyRollUp", err)
 			}
-			if _, err := archiveRaw(ctx, st, "daily_activity_"+strings.ReplaceAll(dataType, "-", "_"), dataType+":dailyRollUp", chunk, page.RawBody, fetchedAt); err != nil {
+			key := fmt.Sprintf("%s:dailyRollUp:%s:%s", dataType, chunk.Start.Format(dateLayout), chunk.End.Format(dateLayout))
+			if _, err := archiveRaw(ctx, st, "daily_activity_"+strings.ReplaceAll(dataType, "-", "_"), key, chunk, page.RawBody, fetchedAt); err != nil {
 				return err
 			}
 			for _, point := range page.Points {
