@@ -977,11 +977,13 @@
             <a class="button button-ghost" href={dashboard.export_urls.canonical_jsonl} download="somascope-visualised-data.jsonl">JSONL</a>
           </div>
 
-          {#if rawOuraExportURL}
+          {#if rawOuraExportURL || rawGoogleExportBaseURL}
             <div class="export-subhead">
               <p class="eyebrow">Raw provider data</p>
             </div>
+          {/if}
 
+          {#if rawOuraExportURL}
             <div class="provider-export-card">
               <div class="provider-export-head">
                 <div>
