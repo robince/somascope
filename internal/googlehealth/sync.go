@@ -246,7 +246,7 @@ func syncSleep(ctx context.Context, st *store.Store, client *Client, accessToken
 
 	rowsWritten := 0
 	for i, page := range pages {
-		rawID, err := archiveRaw(ctx, st, "sleep", fmt.Sprintf("sleep:reconcile:%s:%d", start.Format(dateLayout), i), chunk, page.RawBody, fetchedAt)
+		rawID, err := archiveRaw(ctx, st, "sleep", sleepRawDocumentKey(start, end, i), chunk, page.RawBody, fetchedAt)
 		if err != nil {
 			return err
 		}
@@ -273,6 +273,10 @@ func syncSleep(ctx context.Context, st *store.Store, client *Client, accessToken
 		return failEntity(tracker, "sleep", chunk, "save_sync_state", err)
 	}
 	return tracker.CompleteEntity("sleep")
+}
+
+func sleepRawDocumentKey(start, end time.Time, page int) string {
+	return fmt.Sprintf("sleep:reconcile:%s:%s:%d", start.Format(dateLayout), end.Format(dateLayout), page)
 }
 
 type rawQueryKind int

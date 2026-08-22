@@ -378,6 +378,15 @@ func TestSleepSessionFromClassifiesNap(t *testing.T) {
 	}
 }
 
+func TestSleepRawDocumentKeyIncludesFullRange(t *testing.T) {
+	start, _ := time.Parse(dateLayout, "2026-08-01")
+	shortEnd, _ := time.Parse(dateLayout, "2026-08-10")
+	longEnd, _ := time.Parse(dateLayout, "2026-08-20")
+	if sleepRawDocumentKey(start, shortEnd, 0) == sleepRawDocumentKey(start, longEnd, 0) {
+		t.Fatal("sleep raw keys must differ when the request end date differs")
+	}
+}
+
 func TestGoogleHealthFiltersUseSupportedComparators(t *testing.T) {
 	start, _ := time.Parse(dateLayout, "2026-08-17")
 	end, _ := time.Parse(dateLayout, "2026-08-19")
