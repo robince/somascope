@@ -481,6 +481,9 @@ func TestSyncNormalizesDailyActivityAndSleepAndArchivesHeartrate(t *testing.T) {
 	if len(records) != 1 || records[0].RecordKind != "daily_activity" {
 		t.Fatalf("unexpected daily records: %+v", records)
 	}
+	if records[0].RawDocumentID == nil {
+		t.Fatal("expected daily activity to reference its raw lineage document")
+	}
 	var summary map[string]any
 	if err := json.Unmarshal(records[0].Summary, &summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
@@ -511,6 +514,9 @@ func TestSyncNormalizesDailyActivityAndSleepAndArchivesHeartrate(t *testing.T) {
 	if len(sessions) != 1 || sessions[0].IsNap {
 		t.Fatalf("unexpected sleep sessions: %+v", sessions)
 	}
+	if sessions[0].RawDocumentID == nil {
+		t.Fatal("expected sleep session to reference its raw response")
+	}
 	var stages map[string]any
 	if err := json.Unmarshal(sessions[0].Stages, &stages); err != nil {
 		t.Fatalf("decode stages: %v", err)
@@ -524,13 +530,20 @@ func TestSyncNormalizesDailyActivityAndSleepAndArchivesHeartrate(t *testing.T) {
 		t.Fatalf("raw export: %v", err)
 	}
 	foundHR := false
+	foundActivityLineage := false
 	for _, row := range raw {
 		if row.DocumentKind == "heartrate" {
 			foundHR = true
 		}
+		if row.DocumentKind == "daily_activity_lineage" {
+			foundActivityLineage = strings.Contains(string(row.Payload), "sourceRawDocumentIds")
+		}
 	}
 	if !foundHR {
 		t.Fatalf("expected heartrate raw archive, got %+v", raw)
+	}
+	if !foundActivityLineage {
+		t.Fatalf("expected daily activity lineage manifest, got %+v", raw)
 	}
 }
 

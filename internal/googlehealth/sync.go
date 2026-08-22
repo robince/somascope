@@ -161,15 +161,18 @@ func syncDailyActivity(ctx context.Context, st *store.Store, client *Client, acc
 
 		rowsWritten := 0
 		byDate := map[string]map[string]any{}
+		sourceRawIDs := map[string]int64{}
 		for _, dataType := range []string{"steps", "active-energy-burned", "total-calories", "distance", "active-minutes", "sedentary-period"} {
 			page, err := client.DailyRollup(ctx, accessToken, dataType, chunk.Start, chunk.End, retryWith(retry, tracker, "daily_activity", chunk))
 			if err != nil {
 				return failEntity(tracker, "daily_activity", chunk, "dailyRollUp", err)
 			}
 			key := fmt.Sprintf("%s:dailyRollUp:%s:%s", dataType, chunk.Start.Format(dateLayout), chunk.End.Format(dateLayout))
-			if _, err := archiveRaw(ctx, st, "daily_activity_"+strings.ReplaceAll(dataType, "-", "_"), key, chunk, page.RawBody, fetchedAt); err != nil {
+			rawID, err := archiveRaw(ctx, st, "daily_activity_"+strings.ReplaceAll(dataType, "-", "_"), key, chunk, page.RawBody, fetchedAt)
+			if err != nil {
 				return err
 			}
+			sourceRawIDs[dataType] = rawID
 			for _, point := range page.Points {
 				date := civilDateFrom(point)
 				if date == "" {
@@ -186,13 +189,26 @@ func syncDailyActivity(ctx context.Context, st *store.Store, client *Client, acc
 			if date < chunk.Start.Format(dateLayout) || date > chunk.End.Format(dateLayout) {
 				continue
 			}
+			lineagePayload, err := json.Marshal(map[string]any{
+				"localDate":            date,
+				"sourceRawDocumentIds": sourceRawIDs,
+			})
+			if err != nil {
+				return fmt.Errorf("encode Google Health daily activity lineage: %w", err)
+			}
+			dateValue, _ := time.Parse(dateLayout, date)
+			lineageID, err := archiveRaw(ctx, st, "daily_activity_lineage", "daily_activity:lineage:"+date, dateChunk{Start: dateValue, End: dateValue}, lineagePayload, fetchedAt)
+			if err != nil {
+				return err
+			}
 			if err := st.UpsertDailyRecord(ctx, store.DailyRecord{
-				Provider:     Provider,
-				RecordKind:   "daily_activity",
-				LocalDate:    date,
-				SourceDevice: stringValue(summary["source_device"]),
-				ExternalID:   "daily_activity:" + date,
-				Summary:      mustJSON(summary),
+				Provider:      Provider,
+				RecordKind:    "daily_activity",
+				LocalDate:     date,
+				SourceDevice:  stringValue(summary["source_device"]),
+				ExternalID:    "daily_activity:" + date,
+				Summary:       mustJSON(summary),
+				RawDocumentID: &lineageID,
 			}); err != nil {
 				return err
 			}
@@ -230,7 +246,8 @@ func syncSleep(ctx context.Context, st *store.Store, client *Client, accessToken
 
 	rowsWritten := 0
 	for i, page := range pages {
-		if _, err := archiveRaw(ctx, st, "sleep", fmt.Sprintf("sleep:reconcile:%s:%d", start.Format(dateLayout), i), chunk, page.RawBody, fetchedAt); err != nil {
+		rawID, err := archiveRaw(ctx, st, "sleep", fmt.Sprintf("sleep:reconcile:%s:%d", start.Format(dateLayout), i), chunk, page.RawBody, fetchedAt)
+		if err != nil {
 			return err
 		}
 		for _, item := range page.DataPoints {
@@ -238,6 +255,7 @@ func syncSleep(ctx context.Context, st *store.Store, client *Client, accessToken
 			if !ok {
 				continue
 			}
+			session.RawDocumentID = &rawID
 			if err := st.InsertSleepSession(ctx, session); err != nil {
 				return err
 			}
