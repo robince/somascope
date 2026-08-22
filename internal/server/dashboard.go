@@ -126,15 +126,19 @@ func (s *Server) buildDashboardOverview(ctx context.Context) (dashboardOverview,
 		case "daily_record":
 			switch row.RecordKind {
 			case "daily_activity":
-				if day.ActivityByProvider == nil {
-					day.ActivityByProvider = map[string]*dashboardOverviewActivity{}
+				if activity := buildDashboardActivity(row.Summary); activity != nil {
+					if day.ActivityByProvider == nil {
+						day.ActivityByProvider = map[string]*dashboardOverviewActivity{}
+					}
+					day.ActivityByProvider[row.Provider] = activity
 				}
-				day.ActivityByProvider[row.Provider] = buildDashboardActivity(row.Summary)
 			case "daily_readiness":
-				if day.ReadinessByProvider == nil {
-					day.ReadinessByProvider = map[string]*dashboardOverviewReadiness{}
+				if readiness := buildDashboardReadiness(row.Summary); readiness != nil {
+					if day.ReadinessByProvider == nil {
+						day.ReadinessByProvider = map[string]*dashboardOverviewReadiness{}
+					}
+					day.ReadinessByProvider[row.Provider] = readiness
 				}
-				day.ReadinessByProvider[row.Provider] = buildDashboardReadiness(row.Summary)
 			}
 		case "sleep_session":
 			stateKey := row.Provider + "\x00" + row.LocalDate
