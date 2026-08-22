@@ -441,7 +441,7 @@ func (s *Server) completeProviderAuth(ctx context.Context, provider string, cfg 
 		}
 		externalAccountID, _ := personalInfo["id"].(string)
 		if strings.TrimSpace(externalAccountID) == "" {
-			return store.Connection{}, fmt.Errorf("Oura account identity response did not include an id")
+			return store.Connection{}, fmt.Errorf("oura account identity response did not include an id")
 		}
 		expiresAt := ""
 		if !bundle.ExpiresAt.IsZero() {
