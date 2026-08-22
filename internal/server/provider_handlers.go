@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -246,6 +247,7 @@ func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 	var started []map[string]any
 	var alreadyRunning []map[string]any
 	var skipped []map[string]any
+	var failures []map[string]any
 
 	for _, provider := range knownProviders() {
 		result, err := s.startProviderSync(r.Context(), provider, startDate, endDate)
@@ -257,8 +259,11 @@ func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if err != nil {
-			writeError(w, statusForSyncError(err), err)
-			return
+			failures = append(failures, map[string]any{
+				"provider": provider,
+				"error":    err.Error(),
+			})
+			continue
 		}
 		item := map[string]any{
 			"provider": provider,
@@ -276,6 +281,7 @@ func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 			"error":           "All connected providers are already syncing.",
 			"already_running": alreadyRunning,
 			"skipped":         skipped,
+			"failures":        failures,
 		})
 		return
 	}
@@ -284,9 +290,10 @@ func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 	if len(started) == 0 && len(alreadyRunning) == 0 {
 		status = http.StatusBadRequest
 		writeJSON(w, status, map[string]any{
-			"ok":      false,
-			"error":   "No connected providers to sync.",
-			"skipped": skipped,
+			"ok":       false,
+			"error":    "No connected providers to sync.",
+			"skipped":  skipped,
+			"failures": failures,
 		})
 		return
 	}
@@ -296,6 +303,7 @@ func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 		"started":         started,
 		"already_running": alreadyRunning,
 		"skipped":         skipped,
+		"failures":        failures,
 	})
 }
 
@@ -340,7 +348,7 @@ func (s *Server) startProviderSync(ctx context.Context, provider, startDate, end
 
 	overview, err := s.store.ProviderOverview(ctx, provider, cfg.Configured)
 	if err != nil {
-		return providerSyncStart{}, err
+		log.Printf("warning: load %s overview after starting sync: %v", provider, err)
 	}
 
 	return providerSyncStart{
