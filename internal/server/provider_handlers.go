@@ -121,11 +121,6 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if denied := r.URL.Query().Get("error"); denied != "" {
-		writeOAuthHTML(w, providerDisplayName(provider)+" authorization failed", templateEscape(denied))
-		return
-	}
-
 	expectedState, err := s.store.AppSetting(r.Context(), oauthStateKey(provider))
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		http.Error(w, "failed to read oauth state", http.StatusInternalServerError)
@@ -137,6 +132,10 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	if r.URL.Query().Get("state") != expectedState {
 		http.Error(w, "oauth state mismatch", http.StatusBadRequest)
+		return
+	}
+	if denied := r.URL.Query().Get("error"); denied != "" {
+		writeOAuthHTML(w, providerDisplayName(provider)+" authorization failed", templateEscape(denied))
 		return
 	}
 
