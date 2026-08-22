@@ -218,7 +218,7 @@ func TestSleepLocalDateUsesCivilOffsetNotUTC(t *testing.T) {
 				"endTime":      "2026-08-17T23:30:00Z",
 				"endUtcOffset": "3600s",
 			},
-			"metadata": map[string]any{"mainSleep": true},
+			"metadata": map[string]any{"nap": false},
 			"summary":  map[string]any{"minutesAsleep": "60", "minutesInSleepPeriod": "60"},
 		},
 	})
@@ -230,7 +230,7 @@ func TestSleepLocalDateUsesCivilOffsetNotUTC(t *testing.T) {
 	}
 }
 
-func TestSleepSessionFromUsesMainSleepFlag(t *testing.T) {
+func TestSleepSessionFromUsesNapFlag(t *testing.T) {
 	session, ok := sleepSessionFrom(map[string]any{
 		"dataPointName": "users/me/dataTypes/sleep/dataPoints/1154146694073292232",
 		"sleep": map[string]any{
@@ -240,10 +240,8 @@ func TestSleepSessionFromUsesMainSleepFlag(t *testing.T) {
 				"endTime":        "2026-08-19T04:46:00Z",
 				"endUtcOffset":   "3600s",
 			},
-			"type": "STAGES",
-			"metadata": map[string]any{
-				"mainSleep": true,
-			},
+			"type":     "STAGES",
+			"metadata": map[string]any{"nap": false},
 			"summary": map[string]any{
 				"minutesAsleep":        "449",
 				"minutesInSleepPeriod": "462",
@@ -254,7 +252,7 @@ func TestSleepSessionFromUsesMainSleepFlag(t *testing.T) {
 		t.Fatal("expected sleep session")
 	}
 	if session.IsNap {
-		t.Fatal("expected mainSleep true to be stored as overnight sleep, not a nap")
+		t.Fatal("expected nap false to be stored as overnight sleep")
 	}
 	if session.ExternalID != "1154146694073292232" {
 		t.Fatalf("unexpected external id: %s", session.ExternalID)
@@ -267,6 +265,22 @@ func TestSleepSessionFromUsesMainSleepFlag(t *testing.T) {
 	}
 	if session.EndTime != "2026-08-19T05:46:00.000+01:00" {
 		t.Fatalf("expected local end time, got %s", session.EndTime)
+	}
+}
+
+func TestSleepSessionFromClassifiesNap(t *testing.T) {
+	session, ok := sleepSessionFrom(map[string]any{
+		"sleep": map[string]any{
+			"interval": map[string]any{
+				"startTime": "2026-08-19T13:00:00Z",
+				"endTime":   "2026-08-19T13:45:00Z",
+			},
+			"metadata": map[string]any{"nap": true},
+			"summary":  map[string]any{"minutesAsleep": "40", "minutesInSleepPeriod": "45"},
+		},
+	})
+	if !ok || !session.IsNap {
+		t.Fatalf("expected nap metadata to produce a nap session: %#v", session)
 	}
 }
 
@@ -323,7 +337,7 @@ func TestSyncNormalizesDailyActivityAndSleepAndArchivesHeartrate(t *testing.T) {
 			if strings.Contains(filter, "<=") {
 				return jsonResponseStatus(http.StatusBadRequest, `{"error":{"code":400,"message":"Invalid data point filter: INVALID_DATA_POINT_FILTER_RESTRICTION_COMPARATOR."}}`), nil
 			}
-			return jsonResponse(`{"dataPoints":[{"dataPointName":"users/me/dataTypes/sleep/dataPoints/sleep-1","dataSource":{"device":{"displayName":"Charge 6"}},"sleep":{"interval":{"startTime":"2026-03-19T22:10:00Z","endTime":"2026-03-20T06:12:00Z","civilEndTime":{"date":{"year":2026,"month":3,"day":20}}},"type":"STAGES","metadata":{"mainSleep":true},"summary":{"minutesAsleep":"430","minutesInSleepPeriod":"482","stagesSummary":[{"type":"DEEP","minutes":"90"},{"type":"LIGHT","minutes":"200"},{"type":"REM","minutes":"80"},{"type":"AWAKE","minutes":"52"}]}}}]}`), nil
+			return jsonResponse(`{"dataPoints":[{"dataPointName":"users/me/dataTypes/sleep/dataPoints/sleep-1","dataSource":{"device":{"displayName":"Charge 6"}},"sleep":{"interval":{"startTime":"2026-03-19T22:10:00Z","endTime":"2026-03-20T06:12:00Z","civilEndTime":{"date":{"year":2026,"month":3,"day":20}}},"type":"STAGES","metadata":{"nap":false},"summary":{"minutesAsleep":"430","minutesInSleepPeriod":"482","stagesSummary":[{"type":"DEEP","minutes":"90"},{"type":"LIGHT","minutes":"200"},{"type":"REM","minutes":"80"},{"type":"AWAKE","minutes":"52"}]}}}]}`), nil
 		case strings.Contains(req.URL.Path, "/dataTypes/daily-resting-heart-rate/dataPoints"):
 			filter := req.URL.Query().Get("filter")
 			if strings.Contains(filter, "dailyRestingHeartRate") || !strings.Contains(filter, "daily_resting_heart_rate.date") {

@@ -570,7 +570,7 @@ func sleepSessionFrom(item map[string]any) (store.SleepSession, bool) {
 	duration := intFromAny(summary["minutesAsleep"])
 	timeInBed := intFromAny(summary["minutesInSleepPeriod"])
 	efficiency := efficiencyFrom(summary)
-	mainSleep := isMainSleep(metadata)
+	isNap := boolValue(metadata["nap"])
 	externalID := lastPathSegment(firstNonEmpty(stringValue(item["name"]), stringValue(item["dataPointName"])))
 	if externalID == "" {
 		externalID = startTime
@@ -586,11 +586,11 @@ func sleepSessionFrom(item map[string]any) (store.SleepSession, bool) {
 		DurationMinutes:   duration,
 		TimeInBedMinutes:  timeInBed,
 		EfficiencyPercent: efficiency,
-		IsNap:             !mainSleep,
+		IsNap:             isNap,
 		Stages:            mustJSON(stageMinutes(summary)),
 		Metrics: mustJSON(map[string]any{
 			"type":   firstNonEmpty(stringValue(sleep["type"]), stringValue(sleep["sleepType"])),
-			"main":   mainSleep,
+			"main":   !isNap,
 			"source": deviceName(item),
 		}),
 	}, true
@@ -600,16 +600,6 @@ func sleepFallbackExternalID(item map[string]any) string {
 	sleep, _ := item["sleep"].(map[string]any)
 	interval, _ := sleep["interval"].(map[string]any)
 	return stringValue(interval["startTime"])
-}
-
-func isMainSleep(metadata map[string]any) bool {
-	if metadata == nil {
-		return false
-	}
-	if value, ok := metadata["mainSleep"]; ok {
-		return boolValue(value)
-	}
-	return boolValue(metadata["main"])
 }
 
 func localDateFromPhysical(timestamp, utcOffset string) string {
