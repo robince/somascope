@@ -97,6 +97,16 @@ func TestUpdatePersistsProviderCredentialsInSQLite(t *testing.T) {
 	if publicOura.ClientSecret != "" {
 		t.Fatalf("expected public settings response to hide client secret")
 	}
+	var publicGoogleHealth ProviderConfig
+	for _, provider := range updated.Providers {
+		if provider.Provider == "google_health" {
+			publicGoogleHealth = provider
+			break
+		}
+	}
+	if publicGoogleHealth.DefaultScopes != "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly" {
+		t.Fatalf("expected narrowed Google Health scopes to be preserved, got %q", publicGoogleHealth.DefaultScopes)
+	}
 
 	privateOura, err := store.Provider("oura")
 	if err != nil {

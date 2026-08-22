@@ -166,10 +166,10 @@ func (s *Store) Update(next Settings) (Settings, error) {
 func defaultProviders() []ProviderConfig {
 	return []ProviderConfig{
 		{
-			Provider:    "google_health",
-			RedirectURI: "http://localhost:18080/oauth/google_health/callback",
+			Provider:      "google_health",
+			RedirectURI:   "http://localhost:18080/oauth/google_health/callback",
 			DefaultScopes: googlehealth.DefaultReadonlyScopeString(),
-			Notes: "Bring your own Google Cloud OAuth client. Secrets stay local on this device.",
+			Notes:         "Bring your own Google Cloud OAuth client. Secrets stay local on this device.",
 		},
 		{
 			Provider:      "oura",
@@ -222,15 +222,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func containsAllScopes(stored string, required []string) bool {
-	for _, scope := range required {
-		if !strings.Contains(stored, scope) {
-			return false
-		}
-	}
-	return true
-}
-
 func findDefaultProvider(name string) (ProviderConfig, bool) {
 	return findProvider(defaultProviders(), name)
 }
@@ -262,9 +253,6 @@ func normalizeCredential(provider string, stored appstore.ProviderCredential) ap
 			stored.RedirectURI = defaults.RedirectURI
 		}
 		if stored.DefaultScopes == legacyOuraDefaultScopes {
-			stored.DefaultScopes = defaults.DefaultScopes
-		}
-		if provider == "google_health" && !containsAllScopes(stored.DefaultScopes, googlehealth.DefaultReadonlyScopes()) {
 			stored.DefaultScopes = defaults.DefaultScopes
 		}
 		if stored.DefaultScopes == "" {
