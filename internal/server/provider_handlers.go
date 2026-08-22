@@ -197,7 +197,13 @@ func (s *Server) handleProviderSync(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := s.startProviderSync(r.Context(), provider, strings.TrimSpace(request.StartDate), strings.TrimSpace(request.EndDate))
+	startDate := strings.TrimSpace(request.StartDate)
+	endDate := strings.TrimSpace(request.EndDate)
+	if err := validateSyncRange(startDate, endDate); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	result, err := s.startProviderSync(r.Context(), provider, startDate, endDate)
 	if err != nil {
 		writeError(w, statusForSyncError(err), err)
 		return
@@ -232,6 +238,10 @@ func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 
 	startDate := strings.TrimSpace(request.StartDate)
 	endDate := strings.TrimSpace(request.EndDate)
+	if err := validateSyncRange(startDate, endDate); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
 	var started []map[string]any
 	var alreadyRunning []map[string]any
@@ -581,6 +591,27 @@ func statusForSyncError(err error) int {
 		return http.StatusBadRequest
 	}
 	return http.StatusInternalServerError
+}
+
+func validateSyncRange(startDate, endDate string) error {
+	var start, end time.Time
+	var err error
+	if startDate != "" {
+		start, err = time.Parse("2006-01-02", startDate)
+		if err != nil {
+			return fmt.Errorf("invalid start_date: expected YYYY-MM-DD")
+		}
+	}
+	if endDate != "" {
+		end, err = time.Parse("2006-01-02", endDate)
+		if err != nil {
+			return fmt.Errorf("invalid end_date: expected YYYY-MM-DD")
+		}
+	}
+	if !start.IsZero() && !end.IsZero() && start.After(end) {
+		return fmt.Errorf("invalid sync range: start_date must not be after end_date")
+	}
+	return nil
 }
 
 func templateEscape(value string) string {
