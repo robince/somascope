@@ -126,7 +126,9 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 		activeConnection.Scope = firstNonEmpty(refreshed.Scope, activeConnection.Scope)
 		activeConnection.TokenExpiresAt = isoTime(refreshed.ExpiresAt)
 		activeConnection.Status = "connected"
-		_ = st.UpsertConnection(ctx, activeConnection)
+		if err := st.UpsertConnection(ctx, activeConnection); err != nil {
+			return "", fmt.Errorf("save refreshed Oura token: %w", err)
+		}
 		return activeConnection.AccessToken, nil
 	}
 
