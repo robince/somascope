@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: build dev fmt test frontend frontend-build frontend-dev ensure-embed-dir help
+.PHONY: build ci dev fmt lint release-snapshot test frontend frontend-build frontend-dev ensure-embed-dir help
 
 ensure-embed-dir:
 	@mkdir -p internal/web/dist
@@ -15,8 +15,13 @@ dev: frontend
 fmt:
 	gofmt -w ./cmd ./internal
 
+lint: ensure-embed-dir
+	golangci-lint run ./...
+
 test: ensure-embed-dir
 	go test ./...
+
+ci: test
 
 frontend-build:
 	pnpm --dir frontend build
@@ -28,11 +33,17 @@ frontend: frontend-build ensure-embed-dir
 frontend-dev:
 	@echo "Frontend workspace scaffolded in ./frontend; install dependencies before running Vite."
 
+release-snapshot:
+	goreleaser release --snapshot --clean
+
 help:
 	@printf '%s\n' \
 		'build         Build the local binary' \
+		'ci            Run the local CI subset' \
 		'dev           Run the local server' \
 		'frontend      Build the frontend and copy embedded assets' \
 		'fmt           Format Go sources' \
+		'lint          Run golangci-lint' \
+		'release-snapshot Build snapshot release artifacts with GoReleaser' \
 		'test          Run Go tests' \
 		'frontend-dev  Note about the frontend scaffold'

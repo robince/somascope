@@ -11,7 +11,24 @@ export type AppInfo = {
   };
 };
 
-export type ProviderName = "fitbit" | "oura";
+export type ProviderName = "oura" | "google_health";
+
+export const PROVIDER_LABELS: Record<ProviderName, string> = {
+  oura: "Oura",
+  google_health: "Google Health"
+};
+
+export const PROVIDER_SUBTITLES: Partial<Record<ProviderName, string>> = {
+  google_health: "Fitbit and Pixel Watch data via your Google account."
+};
+
+export function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider as ProviderName] ?? provider;
+}
+
+export function providerSubtitle(provider: string): string {
+  return PROVIDER_SUBTITLES[provider as ProviderName] ?? "";
+}
 
 export type ProviderSettings = {
   provider: ProviderName;
@@ -36,7 +53,7 @@ export type SettingsPayload = {
   }>;
 };
 
-export type OuraStatus = {
+export type ProviderStatus = {
   provider: string;
   configured: boolean;
   connected: boolean;
@@ -142,10 +159,13 @@ export type RecentSleepSession = {
   raw_document_id?: number;
 };
 
-export type OuraRecent = {
+export type ProviderRecent = {
   daily_records: DailyRecord[];
   sleep_sessions: RecentSleepSession[];
 };
+
+export type OuraStatus = ProviderStatus;
+export type OuraRecent = ProviderRecent;
 
 export type DashboardActivity = {
   score?: number;
@@ -184,16 +204,20 @@ export type DashboardSleep = {
 
 export type DashboardDay = {
   date: string;
-  activity?: DashboardActivity;
-  readiness?: DashboardReadiness;
-  sleep?: DashboardSleep;
+  activity_by_provider?: Partial<Record<ProviderName, DashboardActivity>>;
+  readiness_by_provider?: Partial<Record<ProviderName, DashboardReadiness>>;
+  sleep_by_provider?: Partial<Record<ProviderName, DashboardSleep>>;
 };
+
+export type DashboardSource = "all" | ProviderName;
 
 export type DashboardOverview = {
   earliest_date?: string;
   latest_date?: string;
   available_days: number;
   providers: string[];
+  connected_providers?: string[];
+  available_sources?: string[];
   export_urls: {
     canonical_jsonl: string;
     canonical_csv: string;

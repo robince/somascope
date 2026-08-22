@@ -185,18 +185,32 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
-	now := isoNow()
+	type runningRun struct {
+		id       string
+		provider string
+	}
+	var runs []runningRun
 	for rows.Next() {
-		var id string
-		var provider string
-		if err := rows.Scan(&id, &provider); err != nil {
+		var run runningRun
+		if err := rows.Scan(&run.id, &run.provider); err != nil {
+			rows.Close()
 			return err
 		}
+		runs = append(runs, run)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	now := isoNow()
+	for _, item := range runs {
 		run := SyncRun{
-			ID:         id,
-			Provider:   provider,
+			ID:         item.id,
+			Provider:   item.provider,
 			Status:     "interrupted",
 			UpdatedAt:  now,
 			FinishedAt: now,
@@ -226,7 +240,7 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Store) syncRunByQuery(ctx context.Context, query string, args ...any) (SyncRun, error) {

@@ -96,12 +96,12 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 		"user_timezone":"Europe/Paris",
 		"providers":[
 			{
-				"provider":"fitbit",
-				"client_id":"fitbit-client",
+				"provider":"google_health",
+				"client_id":"google-health-client",
 				"client_secret":"secret-one",
-				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
-				"default_scopes":"activity heartrate sleep profile",
-				"notes":"Fitbit notes"
+				"redirect_uri":"http://localhost:18080/oauth/google_health/callback",
+				"default_scopes":"https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+				"notes":"Google Health notes"
 			},
 			{
 				"provider":"oura",
@@ -118,12 +118,12 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 		"user_timezone":"Europe/Paris",
 		"providers":[
 			{
-				"provider":"fitbit",
-				"client_id":"fitbit-client",
+				"provider":"google_health",
+				"client_id":"google-health-client",
 				"client_secret":"",
-				"redirect_uri":"http://localhost:18080/oauth/fitbit/callback",
-				"default_scopes":"activity heartrate sleep profile",
-				"notes":"Fitbit notes"
+				"redirect_uri":"http://localhost:18080/oauth/google_health/callback",
+				"default_scopes":"https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+				"notes":"Google Health notes"
 			},
 			{
 				"provider":"oura",
@@ -147,7 +147,7 @@ func TestSettingsPutPreservesStoredSecretWhenBlank(t *testing.T) {
 	}
 
 	if !payload.Providers[0].Configured {
-		t.Fatalf("expected fitbit provider to remain configured")
+		t.Fatalf("expected google_health provider to remain configured")
 	}
 }
 
@@ -340,6 +340,56 @@ func TestRawExportJSONLFiltersByDateAndDocumentKind(t *testing.T) {
 	}
 }
 
+func TestGoogleHealthAuthStartReturnsAuthorizeURL(t *testing.T) {
+	srv := newTestServer(t)
+
+	saveJSON(t, srv, `{
+		"user_timezone":"Europe/London",
+		"providers":[
+			{
+				"provider":"google_health",
+				"client_id":"google-client",
+				"client_secret":"google-secret",
+				"redirect_uri":"http://localhost:18080/oauth/google_health/callback",
+				"default_scopes":"",
+				"notes":"Google Health notes"
+			},
+			{
+				"provider":"oura",
+				"client_id":"",
+				"client_secret":"",
+				"redirect_uri":"http://localhost:18080/oauth/oura/callback",
+				"default_scopes":"",
+				"notes":"Oura notes"
+			}
+		]
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/providers/google_health/auth/start", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !strings.Contains(payload.AuthorizeURL, "accounts.google.com") {
+		t.Fatalf("expected Google authorize host, got %s", payload.AuthorizeURL)
+	}
+	if !strings.Contains(payload.AuthorizeURL, "code_challenge=") {
+		t.Fatalf("expected PKCE challenge in authorize URL, got %s", payload.AuthorizeURL)
+	}
+	if !strings.Contains(payload.AuthorizeURL, "access_type=offline") {
+		t.Fatalf("expected offline access in authorize URL, got %s", payload.AuthorizeURL)
+	}
+}
+
 func TestOuraAuthStartReturnsAuthorizeURL(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -522,6 +572,58 @@ func TestOuraSyncPersistsRows(t *testing.T) {
 	}
 	if statusSummary.LastCompletedRun.EffectiveEndDate != "2026-03-20" {
 		t.Fatalf("expected persisted run end_date 2026-03-20, got %q", statusSummary.LastCompletedRun.EffectiveEndDate)
+	}
+}
+
+func TestProviderStatusDoesNotSurfaceStaleLastErrorDuringHealthyRun(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	if err := srv.store.CreateSyncRun(ctx, store.SyncRun{
+		ID:         "sync_old_failed",
+		Provider:   "google_health",
+		Status:     "failed",
+		Mode:       "backfill",
+		StartedAt:  "2026-08-19T09:34:20Z",
+		UpdatedAt:  "2026-08-19T09:34:34Z",
+		FinishedAt: "2026-08-19T09:34:34Z",
+		LastError: &store.SyncError{
+			At:             "2026-08-19T09:34:34Z",
+			EntityKind:     "daily_vitals",
+			ChunkStartDate: "2026-08-16",
+			ChunkEndDate:   "2026-08-19",
+			Message:        "old filter error",
+		},
+	}); err != nil {
+		t.Fatalf("seed failed run: %v", err)
+	}
+	if err := srv.store.CreateSyncRun(ctx, store.SyncRun{
+		ID:                "sync_current",
+		Provider:          "google_health",
+		Status:            "running",
+		Mode:              "backfill",
+		StartedAt:         "2026-08-19T10:00:22Z",
+		UpdatedAt:         "2026-08-19T10:00:40Z",
+		CurrentEntityKind: "daily_resting_heart_rate",
+	}); err != nil {
+		t.Fatalf("seed current run: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/providers/google_health/status", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		LastError *store.SyncError `json:"last_error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if payload.LastError != nil {
+		t.Fatalf("did not expect stale last_error during healthy current run, got %+v", payload.LastError)
 	}
 }
 
@@ -775,10 +877,10 @@ func TestOuraCallbackRedirectsBackToReturnTo(t *testing.T) {
 		]
 	}`)
 
-	if err := srv.store.SetAppSetting(context.Background(), ouraOAuthStateKey, "state-123"); err != nil {
+	if err := srv.store.SetAppSetting(context.Background(), oauthStateKey("oura"), "state-123"); err != nil {
 		t.Fatalf("set state: %v", err)
 	}
-	if err := srv.store.SetAppSetting(context.Background(), ouraOAuthReturnToKey, "http://localhost:5173/"); err != nil {
+	if err := srv.store.SetAppSetting(context.Background(), oauthReturnToKey("oura"), "http://localhost:5173/"); err != nil {
 		t.Fatalf("set return_to: %v", err)
 	}
 
@@ -986,24 +1088,24 @@ func TestDashboardOverview(t *testing.T) {
 		} `json:"export_urls"`
 		Daily []struct {
 			Date     string `json:"date"`
-			Activity struct {
+			Activity map[string]struct {
 				Score                 int `json:"score"`
 				Steps                 int `json:"steps"`
 				MediumActivityMinutes int `json:"medium_activity_minutes"`
 				LowActivityMinutes    int `json:"low_activity_minutes"`
 				RestingMinutes        int `json:"resting_minutes"`
-			} `json:"activity"`
-			Readiness struct {
+			} `json:"activity_by_provider"`
+			Readiness map[string]struct {
 				Score int `json:"score"`
-			} `json:"readiness"`
-			Sleep struct {
+			} `json:"readiness_by_provider"`
+			Sleep map[string]struct {
 				DurationMinutes  int     `json:"duration_minutes"`
 				AverageHeartRate float64 `json:"average_heart_rate"`
 				DeepMinutes      int     `json:"deep_minutes"`
 				NapsCount        int     `json:"naps_count"`
 				NapMinutes       int     `json:"nap_minutes"`
 				SleepType        string  `json:"sleep_type"`
-			} `json:"sleep"`
+			} `json:"sleep_by_provider"`
 		} `json:"daily"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -1032,24 +1134,113 @@ func TestDashboardOverview(t *testing.T) {
 	if len(payload.Daily) != 1 {
 		t.Fatalf("expected 1 daily item, got %d", len(payload.Daily))
 	}
-	if payload.Daily[0].Activity.Score != 69 || payload.Daily[0].Activity.Steps != 6480 {
+	ouraActivity := payload.Daily[0].Activity["oura"]
+	if ouraActivity.Score != 69 || ouraActivity.Steps != 6480 {
 		t.Fatalf("unexpected activity summary: %+v", payload.Daily[0].Activity)
 	}
-	if payload.Daily[0].Activity.MediumActivityMinutes != 33 ||
-		payload.Daily[0].Activity.LowActivityMinutes != 271 ||
-		payload.Daily[0].Activity.RestingMinutes != 351 {
-		t.Fatalf("unexpected activity minute conversions: %+v", payload.Daily[0].Activity)
+	if ouraActivity.MediumActivityMinutes != 33 ||
+		ouraActivity.LowActivityMinutes != 271 ||
+		ouraActivity.RestingMinutes != 351 {
+		t.Fatalf("unexpected activity minute conversions: %+v", ouraActivity)
 	}
-	if payload.Daily[0].Readiness.Score != 70 {
+	if payload.Daily[0].Readiness["oura"].Score != 70 {
 		t.Fatalf("unexpected readiness summary: %+v", payload.Daily[0].Readiness)
 	}
-	if payload.Daily[0].Sleep.DurationMinutes != 438 ||
-		payload.Daily[0].Sleep.AverageHeartRate != 65.25 ||
-		payload.Daily[0].Sleep.DeepMinutes != 76 ||
-		payload.Daily[0].Sleep.NapsCount != 1 ||
-		payload.Daily[0].Sleep.NapMinutes != 20 ||
-		payload.Daily[0].Sleep.SleepType != "long_sleep" {
+	ouraSleep := payload.Daily[0].Sleep["oura"]
+	if ouraSleep.DurationMinutes != 438 ||
+		ouraSleep.AverageHeartRate != 65.25 ||
+		ouraSleep.DeepMinutes != 76 ||
+		ouraSleep.NapsCount != 1 ||
+		ouraSleep.NapMinutes != 20 ||
+		ouraSleep.SleepType != "long_sleep" {
 		t.Fatalf("unexpected sleep summary: %+v", payload.Daily[0].Sleep)
+	}
+}
+
+func TestDashboardOverviewKeepsProvidersSeparate(t *testing.T) {
+	srv := newTestServer(t)
+
+	if err := srv.store.UpsertDailyRecord(context.Background(), store.DailyRecord{
+		Provider:   "oura",
+		RecordKind: "daily_activity",
+		LocalDate:  "2026-03-20",
+		ExternalID: "oura-activity",
+		Summary:    json.RawMessage(`{"steps":1000}`),
+	}); err != nil {
+		t.Fatalf("seed oura activity: %v", err)
+	}
+	if err := srv.store.UpsertDailyRecord(context.Background(), store.DailyRecord{
+		Provider:   "google_health",
+		RecordKind: "daily_activity",
+		LocalDate:  "2026-03-20",
+		ExternalID: "daily_activity:2026-03-20",
+		Summary:    json.RawMessage(`{"steps":8000,"medium_activity_minutes":40}`),
+	}); err != nil {
+		t.Fatalf("seed google health activity: %v", err)
+	}
+
+	ouraDuration := 400
+	fitbitDuration := 430
+	if err := srv.store.InsertSleepSession(context.Background(), store.SleepSession{
+		Provider:        "oura",
+		LocalDate:       "2026-03-20",
+		ExternalID:      "oura-sleep",
+		StartTime:       "2026-03-19T22:00:00Z",
+		EndTime:         "2026-03-20T06:00:00Z",
+		DurationMinutes: &ouraDuration,
+		Stages:          json.RawMessage(`{"deep_sleep_duration":3600}`),
+	}); err != nil {
+		t.Fatalf("seed oura sleep: %v", err)
+	}
+	if err := srv.store.InsertSleepSession(context.Background(), store.SleepSession{
+		Provider:        "google_health",
+		LocalDate:       "2026-03-20",
+		ExternalID:      "gh-sleep",
+		StartTime:       "2026-03-19T23:00:00Z",
+		EndTime:         "2026-03-20T07:00:00Z",
+		DurationMinutes: &fitbitDuration,
+		Stages:          json.RawMessage(`{"deep_minutes":90}`),
+	}); err != nil {
+		t.Fatalf("seed google health sleep: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/overview", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Providers []string `json:"providers"`
+		Daily     []struct {
+			Activity map[string]struct {
+				Steps                 int `json:"steps"`
+				MediumActivityMinutes int `json:"medium_activity_minutes"`
+			} `json:"activity_by_provider"`
+			Sleep map[string]struct {
+				DurationMinutes int `json:"duration_minutes"`
+				DeepMinutes     int `json:"deep_minutes"`
+			} `json:"sleep_by_provider"`
+		} `json:"daily"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if strings.Join(payload.Providers, ",") != "google_health,oura" {
+		t.Fatalf("unexpected providers: %+v", payload.Providers)
+	}
+	if payload.Daily[0].Activity["oura"].Steps != 1000 || payload.Daily[0].Activity["google_health"].Steps != 8000 {
+		t.Fatalf("expected separate activity series, got %+v", payload.Daily[0].Activity)
+	}
+	if payload.Daily[0].Activity["google_health"].MediumActivityMinutes != 40 {
+		t.Fatalf("expected google health minutes to stay in minutes, got %+v", payload.Daily[0].Activity["google_health"])
+	}
+	if payload.Daily[0].Sleep["oura"].DurationMinutes != 400 || payload.Daily[0].Sleep["google_health"].DurationMinutes != 430 {
+		t.Fatalf("expected longest sleep per provider, got %+v", payload.Daily[0].Sleep)
+	}
+	if payload.Daily[0].Sleep["oura"].DeepMinutes != 60 || payload.Daily[0].Sleep["google_health"].DeepMinutes != 90 {
+		t.Fatalf("expected stage units converted per source, got %+v", payload.Daily[0].Sleep)
 	}
 }
 

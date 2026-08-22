@@ -7,20 +7,22 @@
     AppInfo,
     AppView,
     DashboardOverview,
-    OuraRecent,
-    OuraStatus,
     PeriodId,
+    ProviderName,
+    ProviderRecent,
     ProviderSettings,
+    ProviderStatus,
     SettingsPayload
   } from "./lib/types";
+  import { providerLabel } from "./lib/types";
 
   const PROVIDER_DEFAULTS: Record<ProviderSettings["provider"], Omit<ProviderSettings, "configured" | "client_secret">> = {
-    fitbit: {
-      provider: "fitbit",
+    google_health: {
+      provider: "google_health",
       client_id: "",
-      redirect_uri: "http://localhost:18080/oauth/fitbit/callback",
-      default_scopes: "activity heartrate sleep profile",
-      notes: "Best for development and single-user local setups."
+      redirect_uri: "http://localhost:18080/oauth/google_health/callback",
+      default_scopes: "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly https://www.googleapis.com/auth/googlehealth.sleep.readonly https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly https://www.googleapis.com/auth/googlehealth.nutrition.readonly https://www.googleapis.com/auth/googlehealth.profile.readonly https://www.googleapis.com/auth/googlehealth.settings.readonly https://www.googleapis.com/auth/googlehealth.ecg.readonly https://www.googleapis.com/auth/googlehealth.irn.readonly https://www.googleapis.com/auth/googlehealth.location.readonly",
+      notes: "Bring your own Google Cloud OAuth client. Secrets stay local on this device."
     },
     oura: {
       provider: "oura",
@@ -34,8 +36,9 @@
   let appInfo: AppInfo | null = null;
   let dashboard: DashboardOverview | null = null;
   let providers: ProviderSettings[] = [];
-  let ouraStatus: OuraStatus | null = null;
-  let ouraRecent: OuraRecent = { daily_records: [], sleep_sessions: [] };
+  let providerStatus: Partial<Record<ProviderName, ProviderStatus | null>> = {};
+  let providerRecent: Partial<Record<ProviderName, ProviderRecent>> = {};
+  let providerBusy: Partial<Record<ProviderName, boolean>> = {};
   let userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   let activeView: AppView = "dashboard";
   let activePeriod: PeriodId = "1m";
@@ -47,7 +50,7 @@
   let recentLoading = true;
   let settingsLoading = true;
   let saving = false;
-  let ouraBusy = false;
+  let anySyncBusy = false;
   let dirty = false;
   let appInfoError = "";
   let settingsError = "";
@@ -75,12 +78,12 @@
   function normalizeProviders(items: SettingsPayload["providers"] | undefined): ProviderSettings[] {
     const mapped = new Map<ProviderSettings["provider"], ProviderSettings>();
 
-    for (const provider of ["fitbit", "oura"] as const) {
+    for (const provider of ["google_health", "oura"] as const) {
       mapped.set(provider, baseProvider(provider));
     }
 
     for (const item of items ?? []) {
-      if (item.provider !== "fitbit" && item.provider !== "oura") {
+      if (item.provider !== "google_health" && item.provider !== "oura") {
         continue;
       }
       mapped.set(item.provider, {
@@ -94,7 +97,7 @@
       });
     }
 
-    return (["fitbit", "oura"] as const).map((provider) => mapped.get(provider)!);
+    return (["google_health", "oura"] as const).map((provider) => mapped.get(provider)!);
   }
 
   function viewFromLocation(pathname: string, hash: string): AppView {
@@ -118,9 +121,9 @@
     const provider = url.searchParams.get("oauth_provider");
     const status = url.searchParams.get("oauth_status");
 
-    if (provider === "oura" && status === "connected") {
+    if ((provider === "oura" || provider === "google_health") && status === "connected") {
       activeView = "settings";
-      success = "Oura connected locally.";
+      success = `${providerLabel(provider)} connected locally.`;
       url.searchParams.delete("oauth_provider");
       url.searchParams.delete("oauth_status");
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
@@ -140,35 +143,37 @@
     return (await response.json()) as T;
   }
 
-  function syncBusyFromStatus(status: OuraStatus | null) {
+  function syncBusyFromStatus(status: ProviderStatus | null | undefined) {
     return status?.current_run?.status === "running";
   }
 
-  function stopOuraStatusPolling() {
+  function stopStatusPolling() {
     if (ouraStatusPollTimer !== null) {
       window.clearInterval(ouraStatusPollTimer);
       ouraStatusPollTimer = null;
     }
   }
 
-  function startOuraStatusPolling() {
+  function startStatusPolling() {
     if (typeof window === "undefined" || ouraStatusPollTimer !== null) {
       return;
     }
     ouraStatusPollTimer = window.setInterval(() => {
-      void loadOuraStatus();
+      void loadAllProviderStatus();
     }, 2000);
   }
 
-  function applyOuraStatus(status: OuraStatus) {
-    const wasBusy = ouraBusy;
-    ouraStatus = status;
+  function applyProviderStatus(status: ProviderStatus) {
+    const provider = status.provider as ProviderName;
+    const wasBusy = Boolean(providerBusy[provider]);
+    providerStatus = { ...providerStatus, [provider]: status };
     statusError = "";
-    ouraBusy = syncBusyFromStatus(status);
-    if (ouraBusy) {
-      startOuraStatusPolling();
+    providerBusy = { ...providerBusy, [provider]: syncBusyFromStatus(status) };
+    anySyncBusy = Object.values(providerBusy).some(Boolean);
+    if (anySyncBusy) {
+      startStatusPolling();
     } else {
-      stopOuraStatusPolling();
+      stopStatusPolling();
       if (wasBusy) {
         void refreshPostRunData();
       }
@@ -222,28 +227,44 @@
     }
   }
 
-  async function loadOuraStatus() {
+  async function loadProviderStatus(provider: ProviderName) {
+    const payload = await fetchJSON<ProviderStatus>(
+      `/api/v1/providers/${provider}/status`,
+      `Failed to refresh ${providerLabel(provider)} sync status.`
+    );
+    applyProviderStatus(payload);
+  }
+
+  async function loadAllProviderStatus() {
     statusLoading = true;
     statusError = "";
     try {
-      const payload = await fetchJSON<OuraStatus>("/api/v1/providers/oura/status", "Failed to refresh Oura sync status.");
-      applyOuraStatus(payload);
+      await Promise.all((["oura", "google_health"] as const).map((provider) => loadProviderStatus(provider)));
     } catch (err) {
       statusError = messageForError(err);
-      stopOuraStatusPolling();
+      stopStatusPolling();
     } finally {
       statusLoading = false;
     }
   }
 
-  async function loadOuraRecent() {
+  async function loadAllProviderRecent() {
     recentLoading = true;
     recentError = "";
     try {
-      ouraRecent = await fetchJSON<OuraRecent>("/api/v1/providers/oura/recent", "Failed to load recent Oura data.");
+      const entries = await Promise.all(
+        (["oura", "google_health"] as const).map(async (provider) => {
+          const payload = await fetchJSON<ProviderRecent>(
+            `/api/v1/providers/${provider}/recent`,
+            `Failed to load recent ${providerLabel(provider)} data.`
+          );
+          return [provider, payload] as const;
+        })
+      );
+      providerRecent = Object.fromEntries(entries);
     } catch (err) {
       recentError = messageForError(err);
-      ouraRecent = { daily_records: [], sleep_sessions: [] };
+      providerRecent = {};
     } finally {
       recentLoading = false;
     }
@@ -255,13 +276,13 @@
       loadAppInfo(),
       loadSettingsData(),
       loadDashboardData(),
-      loadOuraStatus(),
-      loadOuraRecent()
+      loadAllProviderStatus(),
+      loadAllProviderRecent()
     ]);
   }
 
   async function refreshPostRunData() {
-    await Promise.all([loadDashboardData(), loadOuraRecent(), loadOuraStatus()]);
+    await Promise.all([loadDashboardData(), loadAllProviderRecent(), loadAllProviderStatus()]);
   }
 
   async function scrollToAnchor(anchor: string) {
@@ -336,7 +357,7 @@
         throw new Error(payload?.error || "Failed to save local settings.");
       }
 
-      await Promise.all([loadSettingsData(), loadOuraStatus()]);
+      await Promise.all([loadSettingsData(), loadAllProviderStatus()]);
       success = "Saved locally. Secrets are not re-displayed after write.";
     } catch (err) {
       actionError = messageForError(err);
@@ -345,13 +366,14 @@
     }
   }
 
-  async function connectOura() {
-    ouraBusy = true;
+  async function connectProvider(provider: ProviderName) {
+    providerBusy = { ...providerBusy, [provider]: true };
+    anySyncBusy = true;
     actionError = "";
     success = "";
 
     try {
-      const response = await fetch("/api/v1/providers/oura/auth/start", {
+      const response = await fetch(`/api/v1/providers/${provider}/auth/start`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -362,20 +384,21 @@
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
-        throw new Error(payload?.error || "Failed to start Oura authorization.");
+        throw new Error(payload?.error || `Failed to start ${providerLabel(provider)} authorization.`);
       }
       const payload = await response.json();
       if (!payload.authorize_url) {
-        throw new Error("Missing Oura authorize URL.");
+        throw new Error(`Missing ${providerLabel(provider)} authorize URL.`);
       }
       window.location.href = payload.authorize_url;
     } catch (err) {
       actionError = messageForError(err);
-      ouraBusy = false;
+      providerBusy = { ...providerBusy, [provider]: false };
+      anySyncBusy = Object.values(providerBusy).some(Boolean);
     }
   }
 
-  async function syncOura(options?: { startDate?: string; modeLabel?: string }) {
+  async function syncProvider(provider: ProviderName, options?: { startDate?: string; modeLabel?: string }) {
     actionError = "";
     success = "";
 
@@ -385,7 +408,7 @@
         body.start_date = options.startDate;
       }
 
-      const response = await fetch("/api/v1/providers/oura/sync", {
+      const response = await fetch(`/api/v1/providers/${provider}/sync`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -396,9 +419,9 @@
       const payload = await response.json().catch(() => null);
       if (response.status === 409) {
         if (payload?.current_run) {
-          applyOuraStatus({
-            ...(ouraStatus ?? {
-              provider: "oura",
+          applyProviderStatus({
+            ...(providerStatus[provider] ?? {
+              provider,
               configured: true,
               connected: true,
               status: "connected",
@@ -408,18 +431,18 @@
             current_run: payload.current_run
           });
         }
-        success = "Oura sync is already running in the local app.";
+        success = `${providerLabel(provider)} sync is already running in the local app.`;
         return;
       }
 
       if (!response.ok) {
-        throw new Error(payload?.error || "Failed to sync Oura data.");
+        throw new Error(payload?.error || `Failed to sync ${providerLabel(provider)} data.`);
       }
 
       if (payload?.run) {
-        applyOuraStatus({
-          ...(ouraStatus ?? {
-            provider: "oura",
+        applyProviderStatus({
+          ...(providerStatus[provider] ?? {
+            provider,
             configured: true,
             connected: true,
             status: "connected",
@@ -429,32 +452,59 @@
           current_run: payload.run
         });
       } else {
-        ouraBusy = true;
-        startOuraStatusPolling();
+        providerBusy = { ...providerBusy, [provider]: true };
+        anySyncBusy = true;
+        startStatusPolling();
       }
 
       const modeLabel = options?.modeLabel ?? (payload?.run?.mode === "backfill" ? "Backfill" : "Update");
-      success = `${modeLabel} started. The local app will keep syncing even if you refresh this page.`;
+      success = `${modeLabel} started for ${providerLabel(provider)}. The local app will keep syncing even if you refresh this page.`;
     } catch (err) {
       actionError = messageForError(err);
     }
   }
 
-  async function syncOuraIncremental() {
-    await syncOura({ modeLabel: "Update" });
-  }
+  async function syncAllIncremental() {
+    actionError = "";
+    success = "";
 
-  async function syncOuraFromDate() {
-    if (!syncStartDate) {
-      actionError = "Choose a backfill start date first.";
-      success = "";
-      return;
+    try {
+      const response = await fetch("/api/v1/sync", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      const payload = await response.json().catch(() => null);
+      if (response.status === 409) {
+        success = "All connected providers are already syncing.";
+        await loadAllProviderStatus();
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to start provider sync.");
+      }
+
+      for (const item of payload?.started ?? []) {
+        if (item.provider && item.run) {
+          applyProviderStatus({
+            ...(providerStatus[item.provider as ProviderName] ?? {
+              provider: item.provider,
+              configured: true,
+              connected: true,
+              status: "connected",
+              daily_record_count: 0,
+              sleep_session_count: 0
+            }),
+            current_run: item.run
+          });
+        }
+      }
+      success = "Update started for connected providers.";
+    } catch (err) {
+      actionError = messageForError(err);
     }
-
-    await syncOura({
-      startDate: syncStartDate,
-      modeLabel: "Backfill"
-    });
   }
 
   function selectPeriod(period: PeriodId) {
@@ -517,7 +567,7 @@
   });
 
   onDestroy(() => {
-    stopOuraStatusPolling();
+    stopStatusPolling();
   });
 </script>
 
@@ -546,12 +596,12 @@
       {activePeriod}
       {windowEndDate}
       loading={dashboardLoading}
-      {ouraBusy}
-      {ouraStatus}
+      busy={anySyncBusy}
+      statuses={providerStatus}
       error={dashboardError}
       onSelectPeriod={selectPeriod}
       onShiftWindow={shiftWindow}
-      onSyncIncremental={() => void syncOuraIncremental()}
+      onSyncIncremental={() => void syncAllIncremental()}
     />
   </section>
 
@@ -559,24 +609,31 @@
     <SettingsView
       {appInfo}
       {providers}
-      {ouraStatus}
-      {ouraRecent}
+      statuses={providerStatus}
+      recents={providerRecent}
+      busy={providerBusy}
       {userTimezone}
       loading={settingsLoading}
       {statusLoading}
       statusError={statusError}
       {saving}
-      {ouraBusy}
       {syncStartDate}
       {dirty}
       error={settingsViewError}
       {success}
       onReset={resetUnsaved}
       onSave={save}
-      onRefresh={() => void Promise.all([loadOuraStatus(), loadOuraRecent()])}
-      onConnectOura={() => void connectOura()}
-      onSyncOura={() => void syncOuraIncremental()}
-      onSyncOuraFromDate={() => void syncOuraFromDate()}
+      onRefresh={() => void Promise.all([loadAllProviderStatus(), loadAllProviderRecent()])}
+      onConnect={(provider: ProviderName) => void connectProvider(provider)}
+      onSync={(provider: ProviderName) => void syncProvider(provider, { modeLabel: "Update" })}
+      onSyncFromDate={(provider: ProviderName) => {
+        if (!syncStartDate) {
+          actionError = "Choose a backfill start date first.";
+          success = "";
+          return;
+        }
+        void syncProvider(provider, { startDate: syncStartDate, modeLabel: "Backfill" });
+      }}
       onSyncStartDateInput={(value: string) => {
         syncStartDate = value;
         actionError = "";

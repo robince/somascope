@@ -7,22 +7,36 @@
     buildDashboardBuckets,
     chartResolutionForDays,
     centeredMovingAverage,
+    dayActivity,
+    dayReadiness,
+    daySleep,
     fillWindow,
-    minutesToHoursLabel
+    minutesToHoursLabel,
+    providersForSource
   } from "./dashboard";
   import { PERIODS, formatRangeLabel, getPeriod, getWindowStart } from "./time";
-  import type { DashboardOverview, OuraStatus, PeriodId, RawExportOptions } from "./types";
+  import type {
+    DashboardOverview,
+    DashboardSource,
+    PeriodId,
+    ProviderName,
+    ProviderStatus,
+    RawExportOptions
+  } from "./types";
+  import { providerLabel, providerSubtitle } from "./types";
 
   export let dashboard: DashboardOverview | null = null;
   export let activePeriod: PeriodId = "1m";
   export let windowEndDate = "";
   export let loading = false;
-  export let ouraBusy = false;
-  export let ouraStatus: OuraStatus | null = null;
+  export let busy = false;
+  export let statuses: Partial<Record<ProviderName, ProviderStatus | null>> = {};
   export let error = "";
   export let onSelectPeriod: (period: PeriodId) => void = () => {};
   export let onShiftWindow: (direction: -1 | 1) => void = () => {};
   export let onSyncIncremental: () => void = () => {};
+
+  let activeSource: DashboardSource = "all";
 
   const CHART_WIDTH = 720;
   const CHART_HEIGHT = 220;
@@ -38,6 +52,24 @@
   const READINESS_TICKS = [100, 85, 70, 55, 40];
   const SLEEP_AXIS_MAX_MINUTES = 18 * 60;
   type SeriesPoint = { key: string; x: number; y: number };
+  type SleepInterval = { key: string; x: number; width: number; y: number; height: number };
+  type ProviderTrend = {
+    provider: ProviderName;
+    activityRawPoints: SeriesPoint[];
+    activityPath: string;
+    activitySmoothPath: string;
+    readinessRawPoints: SeriesPoint[];
+    readinessPath: string;
+    readinessSmoothPath: string;
+    hasReadiness: boolean;
+    sleepStartPoints: SeriesPoint[];
+    sleepEndPoints: SeriesPoint[];
+    sleepIntervals: SleepInterval[];
+    sleepBandPath: string;
+    sleepStartPath: string;
+    sleepEndPath: string;
+    hasSleep: boolean;
+  };
   let rawOuraStartDate = "";
   let rawOuraEndDate = "";
   let rawOuraSelectedKinds: string[] = [];
@@ -50,7 +82,19 @@
   $: visibleDays = dashboard && windowStartDate ? fillWindow(dashboard.daily, windowStartDate, resolvedEndDate) : [];
   $: rangeLabel = visibleDays.length ? formatRangeLabel(visibleDays[0].date, visibleDays[visibleDays.length - 1].date) : "No visible range";
   $: chartResolution = chartResolutionForDays(visibleDays.length);
-  $: buckets = buildDashboardBuckets(visibleDays, chartResolution);
+  $: availableSources = (dashboard?.available_sources ?? dashboard?.providers ?? []).filter(
+    (provider): provider is ProviderName => provider === "oura" || provider === "google_health"
+  );
+  $: if (activeSource !== "all" && availableSources.length && !availableSources.includes(activeSource)) {
+    activeSource = availableSources.length > 1 ? "all" : availableSources[0];
+  }
+  $: selectedProviders = providersForSource(activeSource, availableSources.length ? availableSources : ["oura"]);
+  $: overlayMode = selectedProviders.length > 1;
+  $: providerBuckets = selectedProviders.map((provider) => ({
+    provider,
+    buckets: buildDashboardBuckets(visibleDays, chartResolution, provider)
+  }));
+  $: buckets = providerBuckets[0]?.buckets ?? [];
   $: chartTimeAxis =
     visibleDays.length && resolvedEndDate
       ? buildChartTimeAxis({
@@ -63,10 +107,6 @@
         })
       : null;
   $: xTicks = chartTimeAxis?.ticks ?? [];
-  $: activityValues = buckets.map((bucket) => bucket.activity_steps);
-  $: readinessValues = buckets.map((bucket) => bucket.readiness_score);
-  $: sleepStartValues = buckets.map((bucket) => bucket.sleep_start_minutes);
-  $: sleepEndValues = buckets.map((bucket) => bucket.sleep_end_minutes);
   $: weekendBands =
     chartResolution === "daily" && chartTimeAxis
       ? buildWeekendBands(visibleDays, chartTimeAxis)
@@ -77,45 +117,123 @@
       : [];
   $: smoothingWindow = getSmoothingWindow(activePeriod);
   $: smoothingOffset = smoothingWindow % 2 === 0 ? 0.5 : 0;
-  $: activitySmoothed = centeredMovingAverage(activityValues, smoothingWindow);
-  $: readinessSmoothed = centeredMovingAverage(readinessValues, smoothingWindow);
-  $: activityMax = niceUpperBound(activityValues, 1000);
+  $: activityMax = niceUpperBound(
+    providerBuckets.flatMap((series) => series.buckets.map((bucket) => bucket.activity_steps)),
+    1000
+  );
   $: activityTicks = buildLinearTicks(activityMax, 4);
-  $: activityRawPoints = buildSeriesPoints(activityValues, buckets, chartTimeAxis, activityY, CHART_HEIGHT);
-  $: activitySmoothPoints = buildSeriesPoints(activitySmoothed, buckets, chartTimeAxis, activityY, CHART_HEIGHT, smoothingOffset);
-  $: activityPath = buildPathFromPoints(activityRawPoints);
-  $: activitySmoothPath = buildPathFromPoints(activitySmoothPoints);
-  $: activityDotCount = activityRawPoints.length;
-  $: readinessRawPoints = buildSeriesPoints(readinessValues, buckets, chartTimeAxis, readinessY, CHART_HEIGHT);
-  $: readinessSmoothPoints = buildSeriesPoints(readinessSmoothed, buckets, chartTimeAxis, readinessY, CHART_HEIGHT, smoothingOffset);
-  $: readinessPath = buildPathFromPoints(readinessRawPoints);
-  $: readinessSmoothPath = buildPathFromPoints(readinessSmoothPoints);
-  $: readinessDotCount = readinessRawPoints.length;
-  $: sleepPairedPoints = (() => {
-    if (!chartTimeAxis) return { start: [] as SeriesPoint[], end: [] as SeriesPoint[] };
-    const start: SeriesPoint[] = [];
-    const end: SeriesPoint[] = [];
-    for (const [index, bucket] of buckets.entries()) {
-      const sv = sleepStartValues[index];
-      const ev = sleepEndValues[index];
-      if (sv == null || ev == null) continue;
-      const x = scaledBucketCenterX(bucket, chartTimeAxis);
-      start.push({ key: bucket.start_date, x, y: clamp(sleepY(sv), CHART_PAD_TOP, SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM) });
-      end.push({ key: bucket.start_date, x, y: clamp(sleepY(ev), CHART_PAD_TOP, SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM) });
+  $: providerTrends = providerBuckets.map(({ provider, buckets: seriesBuckets }): ProviderTrend => {
+    const activityValues = seriesBuckets.map((bucket) => bucket.activity_steps);
+    const activitySmoothed = centeredMovingAverage(activityValues, smoothingWindow);
+    const activityRawPoints = prefixPointKeys(
+      buildSeriesPoints(activityValues, seriesBuckets, chartTimeAxis, activityY, CHART_HEIGHT),
+      provider
+    );
+    const activitySmoothPoints = prefixPointKeys(
+      buildSeriesPoints(activitySmoothed, seriesBuckets, chartTimeAxis, activityY, CHART_HEIGHT, smoothingOffset),
+      provider
+    );
+    const readinessValues = seriesBuckets.map((bucket) => bucket.readiness_score);
+    const readinessSmoothed = centeredMovingAverage(readinessValues, smoothingWindow);
+    const readinessRawPoints = prefixPointKeys(
+      buildSeriesPoints(readinessValues, seriesBuckets, chartTimeAxis, readinessY, CHART_HEIGHT),
+      provider
+    );
+    const readinessSmoothPoints = prefixPointKeys(
+      buildSeriesPoints(readinessSmoothed, seriesBuckets, chartTimeAxis, readinessY, CHART_HEIGHT, smoothingOffset),
+      provider
+    );
+    const sleepStartPoints: SeriesPoint[] = [];
+    const sleepEndPoints: SeriesPoint[] = [];
+    const sleepIntervals: SleepInterval[] = [];
+    const seriesIndex = selectedProviders.indexOf(provider);
+    const seriesCount = Math.max(selectedProviders.length, 1);
+    if (chartTimeAxis) {
+      for (const bucket of seriesBuckets) {
+        if (bucket.sleep_start_minutes == null || bucket.sleep_end_minutes == null) {
+          continue;
+        }
+        const x = scaledBucketCenterX(bucket, chartTimeAxis);
+        const yStart = clamp(sleepY(bucket.sleep_start_minutes), CHART_PAD_TOP, SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM);
+        const yEnd = clamp(sleepY(bucket.sleep_end_minutes), CHART_PAD_TOP, SLEEP_CHART_HEIGHT - CHART_PAD_BOTTOM);
+        sleepStartPoints.push({
+          key: `${provider}-${bucket.start_date}-start`,
+          x,
+          y: yStart
+        });
+        sleepEndPoints.push({
+          key: `${provider}-${bucket.start_date}-end`,
+          x,
+          y: yEnd
+        });
+        const band = chartTimeAxis.bandForRange(bucket.start_date, bucket.end_date);
+        const gap = overlayMode ? 0.8 : 0;
+        const usable = Math.max(band.width - 2, 1.5);
+        const barWidth = overlayMode
+          ? Math.max((usable - gap * (seriesCount - 1)) / seriesCount, 1.2)
+          : Math.max(usable * 0.72, 1.5);
+        const barX = overlayMode ? band.x + 1 + seriesIndex * (barWidth + gap) : band.x + (band.width - barWidth) / 2;
+        sleepIntervals.push({
+          key: `${provider}-${bucket.start_date}-interval`,
+          x: barX,
+          width: barWidth,
+          y: Math.min(yStart, yEnd),
+          height: Math.max(Math.abs(yEnd - yStart), 2)
+        });
+      }
     }
-    return { start, end };
-  })();
-  $: sleepStartPoints = sleepPairedPoints.start;
-  $: sleepEndPoints = sleepPairedPoints.end;
-  $: sleepBandPath = buildBandPathFromPoints(sleepStartPoints, sleepEndPoints);
-  $: sleepStartPath = buildPathFromPoints(sleepStartPoints);
-  $: sleepEndPath = buildPathFromPoints(sleepEndPoints);
-  $: sleepDotCount = sleepStartPoints.length;
-  $: averageReadiness = averageDefined(visibleDays.map((day) => day.readiness?.score));
-  $: averageSleep = averageDefined(visibleDays.map((day) => day.sleep?.duration_minutes));
-  $: averageDailySteps = averageDefined(visibleDays.map((day) => day.activity?.steps));
+
+    return {
+      provider,
+      activityRawPoints,
+      activityPath: buildPathFromPoints(activityRawPoints),
+      activitySmoothPath: buildPathFromPoints(activitySmoothPoints),
+      readinessRawPoints,
+      readinessPath: buildPathFromPoints(readinessRawPoints),
+      readinessSmoothPath: buildPathFromPoints(readinessSmoothPoints),
+      hasReadiness: readinessValues.some((value) => value != null),
+      sleepStartPoints,
+      sleepEndPoints,
+      sleepIntervals,
+      sleepBandPath: buildBandPathFromPoints(sleepStartPoints, sleepEndPoints),
+      sleepStartPath: buildPathFromPoints(sleepStartPoints),
+      sleepEndPath: buildPathFromPoints(sleepEndPoints),
+      hasSleep: sleepStartPoints.length > 0
+    };
+  });
+  $: readinessTrends = providerTrends.filter((series) => series.hasReadiness);
+  $: sleepTrends = providerTrends.filter((series) => series.hasSleep);
+  $: activityDotCount = providerTrends.reduce((count, series) => count + series.activityRawPoints.length, 0);
+  $: readinessDotCount = readinessTrends.reduce((count, series) => count + series.readinessRawPoints.length, 0);
+  $: averageReadiness = averageDefined(
+    visibleDays.flatMap((day) => selectedProviders.map((provider) => dayReadiness(day, provider)?.score))
+  );
+  $: averageSleep = averageDefined(
+    visibleDays.flatMap((day) => selectedProviders.map((provider) => daySleep(day, provider)?.duration_minutes))
+  );
+  $: averageDailySteps = averageDefined(
+    visibleDays.flatMap((day) => selectedProviders.map((provider) => dayActivity(day, provider)?.steps))
+  );
+  $: anyConnected = Object.values(statuses).some((status) => status?.connected);
+  $: lastSyncAt = Object.values(statuses)
+    .map((status) => status?.last_sync_at)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1);
+  $: syncStatusLabel = (["oura", "google_health"] as const)
+    .map((provider) => {
+      const status = statuses[provider];
+      if (!status?.connected && !status?.configured) {
+        return "";
+      }
+      const run = status?.current_run?.status === "running" ? "updating" : "idle";
+      return `${providerLabel(provider)} ${run}`;
+    })
+    .filter(Boolean)
+    .join(" · ");
   $: rawOuraExportBaseURL = dashboard?.export_urls.raw_jsonl_by_provider?.oura ?? "";
   $: rawOuraExportOptions = dashboard?.export_urls.raw_options_by_provider?.oura ?? null;
+  $: rawGoogleExportBaseURL = dashboard?.export_urls.raw_jsonl_by_provider?.google_health ?? "";
   $: rawOuraAvailableKinds = rawOuraExportOptions?.document_kinds ?? [];
   $: {
     const nextSignature = JSON.stringify(rawOuraExportOptions ?? null);
@@ -129,11 +247,6 @@
   $: rawOuraSelectedKinds = rawOuraSelectedKinds.filter((kind, index, kinds) => rawOuraAvailableKinds.includes(kind) && kinds.indexOf(kind) === index);
   $: rawOuraExportURL = buildRawExportURL(rawOuraExportBaseURL, rawOuraStartDate, rawOuraEndDate, rawOuraSelectedKinds);
   $: rawOuraCanExport = rawOuraAvailableKinds.length === 0 || rawOuraSelectedKinds.length > 0;
-
-  function bucketCenterX(index: number, offsetUnits = 0): number {
-    const bucket = buckets[index];
-    return scaledBucketCenterX(bucket, chartTimeAxis, offsetUnits);
-  }
 
   function scaledBucketCenterX(
     bucket: (typeof buckets)[number] | undefined,
@@ -273,6 +386,14 @@
     return 10 * magnitude;
   }
 
+  function prefixPointKeys(points: SeriesPoint[], provider: ProviderName): SeriesPoint[] {
+    return points.map((point) => ({ ...point, key: `${provider}-${point.key}` }));
+  }
+
+  function seriesClass(provider: ProviderName): string {
+    return provider === "google_health" ? "series-google-health" : "series-oura";
+  }
+
   function rollingLabel(windowSize: number): string {
     return `${windowSize}-${chartResolution === "weekly" ? "week" : "day"} average`;
   }
@@ -392,9 +513,9 @@
           class="text-link text-link-strong"
           type="button"
           onclick={() => onSyncIncremental()}
-          disabled={ouraBusy || !ouraStatus?.connected}
+          disabled={busy || !anyConnected}
         >
-          {ouraBusy ? "Updating..." : "Update data"}
+          {busy ? "Updating..." : "Update data"}
         </button>
       </div>
     </div>
@@ -409,8 +530,8 @@
         <span>Average daily steps</span>
       </article>
       <article>
-        <strong>{ouraStatus?.last_sync_at ? "Fresh" : "--"}</strong>
-        <span>{ouraStatus?.last_sync_at ? `Last sync ${new Date(ouraStatus.last_sync_at).toLocaleString()}` : "No sync yet"}</span>
+        <strong>{lastSyncAt ? "Fresh" : "--"}</strong>
+        <span>{syncStatusLabel || (lastSyncAt ? `Last sync ${new Date(lastSyncAt).toLocaleString()}` : "No sync yet")}</span>
       </article>
     </div>
   </article>
@@ -435,6 +556,17 @@
         <button class="nav-button" type="button" onclick={() => onShiftWindow(1)}>Next &rarr;</button>
       </div>
     </div>
+
+    {#if availableSources.length > 1}
+      <div class="source-switch" aria-label="Data source">
+        <button class:active={activeSource === "all"} type="button" onclick={() => (activeSource = "all")}>All</button>
+        {#each availableSources as provider}
+          <button class:active={activeSource === provider} type="button" onclick={() => (activeSource = provider)}>
+            {providerLabel(provider)}
+          </button>
+        {/each}
+      </div>
+    {/if}
 
     <p class="window-copy">{rangeLabel}</p>
   </section>
@@ -465,14 +597,26 @@
         </div>
 
         <div class="trend-legend">
-          <span class="legend-line">
-            <span class="line-swatch line-swatch-raw"></span>
-            Per {chartResolution === "weekly" ? "week" : "day"}
-          </span>
-          <span class="legend-line">
-            <span class="line-swatch line-swatch-smooth"></span>
-            {rollingLabel(smoothingWindow)}
-          </span>
+          {#each selectedProviders as provider}
+            <span class="legend-line">
+              <span
+                class="line-swatch line-swatch-raw"
+                class:series-oura={provider === "oura"}
+                class:series-google-health={provider === "google_health"}
+              ></span>
+              {overlayMode ? providerLabel(provider) : `Per ${chartResolution === "weekly" ? "week" : "day"}`}
+            </span>
+          {/each}
+          {#each selectedProviders as provider}
+            <span class="legend-line">
+              <span
+                class="line-swatch line-swatch-smooth"
+                class:series-oura={provider === "oura"}
+                class:series-google-health={provider === "google_health"}
+              ></span>
+              {overlayMode ? `${providerLabel(provider)} ${rollingLabel(smoothingWindow)}` : rollingLabel(smoothingWindow)}
+            </span>
+          {/each}
         </div>
 
         <div class="trend-wrap">
@@ -513,16 +657,22 @@
               <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{new Intl.NumberFormat().format(tick)}</text>
             {/each}
 
-            {#if activitySmoothPath}
-              <path d={activitySmoothPath} class="trend-path trend-path-smooth" />
-            {/if}
-            {#if activityPath}
-              <path d={activityPath} class="trend-path trend-path-raw" />
-            {/if}
+            {#each providerTrends as series (series.provider)}
+              {#if series.activitySmoothPath}
+                <path d={series.activitySmoothPath} class="trend-path trend-path-smooth {seriesClass(series.provider)}" />
+              {/if}
+            {/each}
+            {#each providerTrends as series (series.provider)}
+              {#if series.activityPath}
+                <path d={series.activityPath} class="trend-path trend-path-raw {seriesClass(series.provider)}" />
+              {/if}
+            {/each}
 
             {#if activityDotCount <= 40}
-              {#each activityRawPoints as point (point.key)}
-                <circle cx={point.x} cy={point.y} r="2.6" class="trend-dot trend-dot-raw" />
+              {#each providerTrends as series (series.provider)}
+                {#each series.activityRawPoints as point (point.key)}
+                  <circle cx={point.x} cy={point.y} r="2.6" class="trend-dot trend-dot-raw {seriesClass(series.provider)}" />
+                {/each}
               {/each}
             {/if}
 
@@ -556,12 +706,35 @@
 
       </article>
 
-      <article class="panel readiness-panel">
+      <article class="panel readiness-panel" class:hidden-panel={!readinessTrends.length}>
         <div class="section-head">
           <div>
             <p class="eyebrow">Trend</p>
             <h2>Readiness</h2>
           </div>
+        </div>
+
+        <div class="trend-legend">
+          {#each readinessTrends as series (series.provider)}
+            <span class="legend-line">
+              <span
+                class="line-swatch line-swatch-raw"
+                class:series-oura={series.provider === "oura"}
+                class:series-google-health={series.provider === "google_health"}
+              ></span>
+              {overlayMode ? providerLabel(series.provider) : `Per ${chartResolution === "weekly" ? "week" : "day"}`}
+            </span>
+          {/each}
+          {#each readinessTrends as series (series.provider)}
+            <span class="legend-line">
+              <span
+                class="line-swatch line-swatch-smooth"
+                class:series-oura={series.provider === "oura"}
+                class:series-google-health={series.provider === "google_health"}
+              ></span>
+              {overlayMode ? `${providerLabel(series.provider)} ${rollingLabel(smoothingWindow)}` : rollingLabel(smoothingWindow)}
+            </span>
+          {/each}
         </div>
 
         <div class="trend-wrap">
@@ -602,16 +775,22 @@
               <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{tick}</text>
             {/each}
 
-            {#if readinessSmoothPath}
-              <path d={readinessSmoothPath} class="trend-path trend-path-smooth" />
-            {/if}
-            {#if readinessPath}
-              <path d={readinessPath} class="trend-path trend-path-raw" />
-            {/if}
+            {#each readinessTrends as series (series.provider)}
+              {#if series.readinessSmoothPath}
+                <path d={series.readinessSmoothPath} class="trend-path trend-path-smooth {seriesClass(series.provider)}" />
+              {/if}
+            {/each}
+            {#each readinessTrends as series (series.provider)}
+              {#if series.readinessPath}
+                <path d={series.readinessPath} class="trend-path trend-path-raw {seriesClass(series.provider)}" />
+              {/if}
+            {/each}
 
             {#if readinessDotCount <= 40}
-              {#each readinessRawPoints as point (point.key)}
-                <circle cx={point.x} cy={point.y} r="2.6" class="trend-dot trend-dot-raw" />
+              {#each readinessTrends as series (series.provider)}
+                {#each series.readinessRawPoints as point (point.key)}
+                  <circle cx={point.x} cy={point.y} r="2.6" class="trend-dot trend-dot-raw {seriesClass(series.provider)}" />
+                {/each}
               {/each}
             {/if}
 
@@ -691,24 +870,42 @@
               <text x={CHART_PAD_LEFT - 8} y={y + 4} text-anchor="end" class="axis-label">{tick.label}</text>
             {/each}
 
-            {#if sleepBandPath}
-              <path d={sleepBandPath} class="sleep-band" />
-            {/if}
-            {#if sleepStartPath}
-              <path d={sleepStartPath} class="trend-path sleep-start-path" />
-            {/if}
-            {#if sleepEndPath}
-              <path d={sleepEndPath} class="trend-path sleep-end-path" />
-            {/if}
+            {#each sleepTrends as series (series.provider)}
+              {#if series.sleepStartPoints.length > 1 && series.sleepBandPath}
+                <path d={series.sleepBandPath} class="sleep-band {seriesClass(series.provider)}" />
+              {/if}
+            {/each}
+            {#each sleepTrends as series (series.provider)}
+              {#each series.sleepIntervals as interval (interval.key)}
+                <rect
+                  x={interval.x}
+                  y={interval.y}
+                  width={interval.width}
+                  height={interval.height}
+                  rx="1.4"
+                  class="sleep-interval {seriesClass(series.provider)}"
+                />
+              {/each}
+            {/each}
+            {#each sleepTrends as series (series.provider)}
+              {#if series.sleepStartPoints.length > 1 && series.sleepStartPath}
+                <path d={series.sleepStartPath} class="trend-path sleep-start-path" />
+              {/if}
+              {#if series.sleepStartPoints.length > 1 && series.sleepEndPath}
+                <path d={series.sleepEndPath} class="trend-path sleep-end-path" />
+              {/if}
+            {/each}
 
-            {#if sleepDotCount <= 40}
-              {#each sleepStartPoints as point (point.key)}
-                <circle cx={point.x} cy={point.y} r="2.5" class="trend-dot sleep-start-dot" />
-              {/each}
-              {#each sleepEndPoints as point (point.key)}
-                <circle cx={point.x} cy={point.y} r="2.5" class="trend-dot sleep-end-dot" />
-              {/each}
-            {/if}
+            {#each sleepTrends as series (series.provider)}
+              {#if series.sleepStartPoints.length <= 40}
+                {#each series.sleepStartPoints as point (point.key)}
+                  <circle cx={point.x} cy={point.y} r="2.5" class="trend-dot sleep-start-dot {seriesClass(series.provider)}" />
+                {/each}
+                {#each series.sleepEndPoints as point (point.key)}
+                  <circle cx={point.x} cy={point.y} r="2.5" class="trend-dot sleep-end-dot {seriesClass(series.provider)}" />
+                {/each}
+              {/if}
+            {/each}
 
             <line
               x1={CHART_PAD_LEFT}
@@ -739,6 +936,18 @@
         </div>
 
         <div class="trend-legend">
+          {#if overlayMode}
+            {#each sleepTrends as series (series.provider)}
+              <span class="legend-line">
+                <span
+                  class="band-swatch"
+                  class:series-oura={series.provider === "oura"}
+                  class:series-google-health={series.provider === "google_health"}
+                ></span>
+                {providerLabel(series.provider)}
+              </span>
+            {/each}
+          {/if}
           <span class="legend-line">
             <span class="line-swatch sleep-start-swatch"></span>
             Sleep start
@@ -850,6 +1059,23 @@
               {/if}
             </div>
           {/if}
+
+          {#if rawGoogleExportBaseURL}
+            <div class="provider-export-card">
+              <div class="provider-export-head">
+                <div>
+                  <p class="eyebrow">Raw Data</p>
+                  <h3>Google Health</h3>
+                  {#if providerSubtitle("google_health")}
+                    <p class="provider-subtitle">{providerSubtitle("google_health")}</p>
+                  {/if}
+                </div>
+              </div>
+              <div class="export-actions">
+                <a class="button button-ghost" href={rawGoogleExportBaseURL} download="somascope-google-health-raw.jsonl">Google Health Data (JSONL)</a>
+              </div>
+            </div>
+          {/if}
         </div>
       </article>
     </section>
@@ -897,6 +1123,7 @@
   .toolbar,
   .period-group,
   .nav-group,
+  .source-switch,
   .trend-legend {
     display: flex;
     gap: 12px;
@@ -932,6 +1159,46 @@
   .window-copy {
     color: var(--muted);
     line-height: 1.5;
+  }
+
+  .source-switch {
+    justify-content: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .source-switch button {
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    border-radius: 999px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+
+  .source-switch button.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+
+  .hidden-panel {
+    display: none;
+  }
+
+  .series-oura {
+    --series-raw: rgba(26, 106, 114, 0.38);
+    --series-smooth: #0f3f44;
+    --series-dot: rgba(26, 106, 114, 0.48);
+    --series-band: rgba(26, 106, 114, 0.16);
+  }
+
+  .series-google-health {
+    --series-raw: rgba(196, 107, 45, 0.45);
+    --series-smooth: #7a3814;
+    --series-dot: rgba(196, 107, 45, 0.58);
+    --series-band: rgba(196, 107, 45, 0.2);
   }
 
   .hero-actions {
@@ -1046,11 +1313,18 @@
   }
 
   .line-swatch-raw {
-    color: rgba(26, 106, 114, 0.34);
+    color: var(--series-raw, rgba(26, 106, 114, 0.38));
   }
 
   .line-swatch-smooth {
-    color: var(--accent);
+    color: var(--series-smooth, #0f3f44);
+  }
+
+  .band-swatch {
+    width: 20px;
+    height: 8px;
+    border-radius: 3px;
+    background: var(--series-band, rgba(26, 106, 114, 0.16));
   }
 
   .trend-wrap {
@@ -1141,12 +1415,12 @@
   }
 
   .trend-path-raw {
-    stroke: rgba(26, 106, 114, 0.34);
+    stroke: var(--series-raw, rgba(26, 106, 114, 0.38));
     stroke-width: 1.9;
   }
 
   .trend-path-smooth {
-    stroke: var(--accent);
+    stroke: var(--series-smooth, #0f3f44);
   }
 
   .trend-dot {
@@ -1155,7 +1429,7 @@
   }
 
   .trend-dot-raw {
-    fill: rgba(26, 106, 114, 0.42);
+    fill: var(--series-dot, rgba(26, 106, 114, 0.48));
   }
 
   .export-stack {
@@ -1188,6 +1462,12 @@
   h3 {
     margin: 0;
     font-size: 1.1rem;
+  }
+
+  .provider-subtitle {
+    margin: 4px 0 0;
+    color: var(--muted);
+    line-height: 1.45;
   }
 
   .export-subhead {
@@ -1294,8 +1574,14 @@
   }
 
   .sleep-band {
-    fill: rgba(38, 94, 126, 0.12);
+    fill: var(--series-band, rgba(26, 106, 114, 0.16));
     stroke: none;
+  }
+
+  .sleep-interval {
+    fill: var(--series-band, rgba(26, 106, 114, 0.28));
+    stroke: var(--series-smooth, #0f3f44);
+    stroke-width: 1.1;
   }
 
   .sleep-start-path,

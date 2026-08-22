@@ -59,12 +59,12 @@ func TestUpdatePersistsProviderCredentialsInSQLite(t *testing.T) {
 		UserTimezone: "Europe/London",
 		Providers: []ProviderConfig{
 			{
-				Provider:      "fitbit",
+				Provider:      "google_health",
 				ClientID:      "",
 				ClientSecret:  "",
-				RedirectURI:   "http://localhost:18080/oauth/fitbit/callback",
-				DefaultScopes: "activity heartrate sleep profile",
-				Notes:         "Fitbit notes",
+				RedirectURI:   "http://localhost:18080/oauth/google_health/callback",
+				DefaultScopes: "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+				Notes:         "Google Health notes",
 			},
 			{
 				Provider:      "oura",
@@ -171,4 +171,56 @@ func TestLoadNormalizesLegacyOuraScopeString(t *testing.T) {
 	}
 
 	t.Fatalf("expected Oura provider in settings load")
+}
+
+func TestLoadMigratesLegacyFitbitCredentials(t *testing.T) {
+	app, err := appstore.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer app.Close()
+
+	if err := app.UpsertProviderCredential(context.Background(), appstore.ProviderCredential{
+		Provider:      "fitbit",
+		ClientID:      "legacy-fitbit-client",
+		ClientSecret:  "legacy-fitbit-secret",
+		RedirectURI:   "http://localhost:18080/oauth/fitbit/callback",
+		DefaultScopes: "activity heartrate sleep profile",
+		Notes:         "old fitbit app",
+	}); err != nil {
+		t.Fatalf("seed fitbit credential: %v", err)
+	}
+
+	store := NewStore(app)
+	value, err := store.Load()
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+
+	var googleHealth ProviderConfig
+	for _, provider := range value.Providers {
+		if provider.Provider == "google_health" {
+			googleHealth = provider
+		}
+		if provider.Provider == "fitbit" {
+			t.Fatalf("expected leftover fitbit provider to stay out of settings payload")
+		}
+	}
+	if !googleHealth.Configured {
+		t.Fatalf("expected migrated google_health provider to be configured")
+	}
+	if googleHealth.ClientID != "legacy-fitbit-client" {
+		t.Fatalf("unexpected migrated client id: %q", googleHealth.ClientID)
+	}
+	if googleHealth.RedirectURI != "http://localhost:18080/oauth/google_health/callback" {
+		t.Fatalf("expected migrated redirect, got %q", googleHealth.RedirectURI)
+	}
+
+	private, err := store.Provider("google_health")
+	if err != nil {
+		t.Fatalf("load private google_health settings: %v", err)
+	}
+	if private.ClientSecret != "legacy-fitbit-secret" {
+		t.Fatalf("expected migrated secret, got %q", private.ClientSecret)
+	}
 }

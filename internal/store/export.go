@@ -109,6 +109,14 @@ func (s *Store) UpsertDailyRecord(ctx context.Context, record DailyRecord) error
 	return err
 }
 
+func (s *Store) DeleteSleepSession(ctx context.Context, provider, externalID string) error {
+	if provider == "" || externalID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sleep_sessions WHERE provider = ? AND external_id = ?`, provider, externalID)
+	return err
+}
+
 func (s *Store) InsertSleepSession(ctx context.Context, session SleepSession) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sleep_sessions (
