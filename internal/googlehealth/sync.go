@@ -309,7 +309,9 @@ func syncSnapshots(ctx context.Context, st *store.Store, client *Client, accessT
 func syncRawArchives(ctx context.Context, st *store.Store, client *Client, accessToken string, start, end time.Time, fetchedAt string, tracker *providersync.Tracker, retry RetryConfig) error {
 	for _, entity := range rawArchiveEntities() {
 		chunks := dateChunks(start, end, 14)
-		if entity.dense {
+		if entity.query == rawQueryECG {
+			chunks = []dateChunk{{Start: start, End: end}}
+		} else if entity.dense {
 			chunks = dateChunks(start, end, 1)
 		}
 		if err := tracker.StartEntity(entity.kind, start.Format(dateLayout), end.Format(dateLayout), len(chunks)); err != nil {
