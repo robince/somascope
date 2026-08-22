@@ -331,6 +331,9 @@ func syncRawArchives(ctx context.Context, st *store.Store, client *Client, acces
 			if err != nil {
 				if skipRawError(err) {
 					log.Printf("warning: skipping google health %s: %v", entity.kind, err)
+					if completeErr := tracker.CompleteChunk(entity.kind, chunk.End.Format(dateLayout), 0); completeErr != nil {
+						return completeErr
+					}
 					skipped = true
 					break
 				}
