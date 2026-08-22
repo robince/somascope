@@ -185,18 +185,37 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
-	now := isoNow()
+	type runningRun struct {
+		id       string
+		provider string
+	}
+	var runs []runningRun
 	for rows.Next() {
-		var id string
-		var provider string
-		if err := rows.Scan(&id, &provider); err != nil {
+		var run runningRun
+		if err := rows.Scan(&run.id, &run.provider); err != nil {
+			_ = rows.Close()
 			return err
 		}
+		runs = append(runs, run)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := isoNow()
+	for _, item := range runs {
 		run := SyncRun{
-			ID:         id,
-			Provider:   provider,
+			ID:         item.id,
+			Provider:   item.provider,
 			Status:     "interrupted",
 			UpdatedAt:  now,
 			FinishedAt: now,
@@ -205,14 +224,14 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 				Message: message,
 			},
 		}
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE sync_runs
 			SET status = ?, updated_at = ?, finished_at = ?, last_error_json = ?
 			WHERE id = ?
 		`, run.Status, run.UpdatedAt, run.FinishedAt, mustJSONText(run.LastError), run.ID); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE sync_run_entities
 			SET
 				status = CASE WHEN status = 'running' THEN 'failed' ELSE status END,
@@ -226,7 +245,7 @@ func (s *Store) MarkRunningSyncRunsInterrupted(ctx context.Context, message stri
 			return err
 		}
 	}
-	return rows.Err()
+	return tx.Commit()
 }
 
 func (s *Store) syncRunByQuery(ctx context.Context, query string, args ...any) (SyncRun, error) {
@@ -298,7 +317,7 @@ func (s *Store) SyncRunEntities(ctx context.Context, runID string) ([]SyncRunEnt
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []SyncRunEntity
 	for rows.Next() {

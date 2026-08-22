@@ -8,12 +8,21 @@ import (
 	appstore "github.com/robince/somascope/internal/store"
 )
 
+func cleanupStore(t *testing.T, closer interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+}
+
 func TestLoadReturnsSQLiteDefaultsWhenUnset(t *testing.T) {
 	app, err := appstore.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	store := NewStore(app)
 	value, err := store.Load()
@@ -52,19 +61,19 @@ func TestUpdatePersistsProviderCredentialsInSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	store := NewStore(app)
 	updated, err := store.Update(Settings{
 		UserTimezone: "Europe/London",
 		Providers: []ProviderConfig{
 			{
-				Provider:      "fitbit",
+				Provider:      "google_health",
 				ClientID:      "",
 				ClientSecret:  "",
-				RedirectURI:   "http://localhost:18080/oauth/fitbit/callback",
-				DefaultScopes: "activity heartrate sleep profile",
-				Notes:         "Fitbit notes",
+				RedirectURI:   "http://localhost:18080/oauth/google_health/callback",
+				DefaultScopes: "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+				Notes:         "Google Health notes",
 			},
 			{
 				Provider:      "oura",
@@ -97,6 +106,16 @@ func TestUpdatePersistsProviderCredentialsInSQLite(t *testing.T) {
 	if publicOura.ClientSecret != "" {
 		t.Fatalf("expected public settings response to hide client secret")
 	}
+	var publicGoogleHealth ProviderConfig
+	for _, provider := range updated.Providers {
+		if provider.Provider == "google_health" {
+			publicGoogleHealth = provider
+			break
+		}
+	}
+	if publicGoogleHealth.DefaultScopes != "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly" {
+		t.Fatalf("expected narrowed Google Health scopes to be preserved, got %q", publicGoogleHealth.DefaultScopes)
+	}
 
 	privateOura, err := store.Provider("oura")
 	if err != nil {
@@ -112,7 +131,7 @@ func TestProviderNormalizesLegacyLoopbackRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	if err := app.UpsertProviderCredential(context.Background(), appstore.ProviderCredential{
 		Provider:      "oura",
@@ -141,7 +160,7 @@ func TestLoadNormalizesLegacyOuraScopeString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer app.Close()
+	cleanupStore(t, app)
 
 	if err := app.UpsertProviderCredential(context.Background(), appstore.ProviderCredential{
 		Provider:      "oura",
@@ -171,4 +190,88 @@ func TestLoadNormalizesLegacyOuraScopeString(t *testing.T) {
 	}
 
 	t.Fatalf("expected Oura provider in settings load")
+}
+
+func TestLoadMigratesLegacyFitbitCredentials(t *testing.T) {
+	app, err := appstore.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cleanupStore(t, app)
+
+	if err := app.UpsertProviderCredential(context.Background(), appstore.ProviderCredential{
+		Provider:      "fitbit",
+		ClientID:      "legacy-fitbit-client",
+		ClientSecret:  "legacy-fitbit-secret",
+		RedirectURI:   "http://localhost:18080/oauth/fitbit/callback",
+		DefaultScopes: "activity heartrate sleep profile",
+		Notes:         "old fitbit app",
+	}); err != nil {
+		t.Fatalf("seed fitbit credential: %v", err)
+	}
+
+	store := NewStore(app)
+	value, err := store.Load()
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+
+	var googleHealth ProviderConfig
+	for _, provider := range value.Providers {
+		if provider.Provider == "google_health" {
+			googleHealth = provider
+		}
+		if provider.Provider == "fitbit" {
+			t.Fatalf("expected leftover fitbit provider to stay out of settings payload")
+		}
+	}
+	if googleHealth.Configured {
+		t.Fatalf("expected google_health to remain unconfigured")
+	}
+	if googleHealth.ClientID != "" {
+		t.Fatalf("expected empty google_health client id, got %q", googleHealth.ClientID)
+	}
+	if googleHealth.RedirectURI != "http://localhost:18080/oauth/google_health/callback" {
+		t.Fatalf("expected migrated redirect, got %q", googleHealth.RedirectURI)
+	}
+
+	private, err := store.Provider("google_health")
+	if err != nil {
+		t.Fatalf("load private google_health settings: %v", err)
+	}
+	if private.ClientSecret != "" {
+		t.Fatalf("expected empty google_health secret, got %q", private.ClientSecret)
+	}
+	if private.Notes != "old fitbit app" {
+		t.Fatalf("expected legacy notes to be preserved, got %q", private.Notes)
+	}
+}
+
+func TestLoadDoesNotOverwritePartialGoogleHealthSettingsDuringFitbitMigration(t *testing.T) {
+	app, err := appstore.Open(context.Background(), filepath.Join(t.TempDir(), "somascope.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cleanupStore(t, app)
+
+	for _, credential := range []appstore.ProviderCredential{
+		{Provider: "fitbit", ClientID: "legacy-fitbit-client", ClientSecret: "legacy-fitbit-secret", RedirectURI: "http://localhost:18080/oauth/fitbit/callback"},
+		{Provider: "google_health", ClientID: "google-client", RedirectURI: "http://localhost:18080/oauth/google_health/callback", DefaultScopes: "custom.readonly", Notes: "custom notes"},
+	} {
+		if err := app.UpsertProviderCredential(context.Background(), credential); err != nil {
+			t.Fatalf("seed %s credential: %v", credential.Provider, err)
+		}
+	}
+
+	store := NewStore(app)
+	if _, err := store.Load(); err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	googleHealth, err := store.Provider("google_health")
+	if err != nil {
+		t.Fatalf("load Google Health settings: %v", err)
+	}
+	if googleHealth.ClientID != "google-client" || googleHealth.DefaultScopes != "custom.readonly" || googleHealth.Notes != "custom notes" {
+		t.Fatalf("partial Google Health settings were overwritten: %#v", googleHealth)
+	}
 }

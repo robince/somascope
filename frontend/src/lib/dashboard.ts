@@ -1,4 +1,4 @@
-import type { DashboardDay, DashboardSleep } from "./types";
+import type { DashboardActivity, DashboardDay, DashboardReadiness, DashboardSleep, DashboardSource, ProviderName } from "./types";
 import { buildDateRange } from "./time";
 
 export const SLEEP_AXIS_LABELS = [
@@ -30,6 +30,25 @@ export type DashboardBucket = {
 export function fillWindow(daily: DashboardDay[], startDate: string, endDate: string): DashboardDay[] {
   const daysByDate = new Map(daily.map((day) => [day.date, day]));
   return buildDateRange(startDate, endDate).map((date) => daysByDate.get(date) ?? { date });
+}
+
+export function dayActivity(day: DashboardDay, provider: ProviderName): DashboardActivity | undefined {
+  return day.activity_by_provider?.[provider];
+}
+
+export function dayReadiness(day: DashboardDay, provider: ProviderName): DashboardReadiness | undefined {
+  return day.readiness_by_provider?.[provider];
+}
+
+export function daySleep(day: DashboardDay, provider: ProviderName): DashboardSleep | undefined {
+  return day.sleep_by_provider?.[provider];
+}
+
+export function providersForSource(source: DashboardSource, available: string[]): ProviderName[] {
+  if (source === "all") {
+    return available.filter((provider): provider is ProviderName => provider === "oura" || provider === "google_health");
+  }
+  return [source];
 }
 
 export function averageDefined(values: Array<number | null | undefined>): number | null {
@@ -70,7 +89,11 @@ export function chartResolutionForDays(dayCount: number): ChartResolution {
   return dayCount > 180 ? "weekly" : "daily";
 }
 
-export function buildDashboardBuckets(days: DashboardDay[], resolution: ChartResolution): DashboardBucket[] {
+export function buildDashboardBuckets(
+  days: DashboardDay[],
+  resolution: ChartResolution,
+  provider: ProviderName
+): DashboardBucket[] {
   const bucketSize = resolution === "weekly" ? 7 : 1;
   const buckets: DashboardBucket[] = [];
 
@@ -81,18 +104,18 @@ export function buildDashboardBuckets(days: DashboardDay[], resolution: ChartRes
     }
 
     const sleepRanges = slice
-      .map((day) => sleepRangeMinutes(day.sleep))
+      .map((day) => sleepRangeMinutes(daySleep(day, provider)))
       .filter((range): range is { start: number; end: number } => range != null);
 
     buckets.push({
       start_date: slice[0].date,
       end_date: slice[slice.length - 1].date,
       label_date: slice[slice.length - 1].date,
-      activity_steps: averageDefined(slice.map((day) => day.activity?.steps)),
-      readiness_score: averageDefined(slice.map((day) => day.readiness?.score)),
+      activity_steps: averageDefined(slice.map((day) => dayActivity(day, provider)?.steps)),
+      readiness_score: averageDefined(slice.map((day) => dayReadiness(day, provider)?.score)),
       sleep_start_minutes: medianDefined(sleepRanges.map((range) => range.start)),
       sleep_end_minutes: medianDefined(sleepRanges.map((range) => range.end)),
-      sleep_duration_minutes: averageDefined(slice.map((day) => day.sleep?.duration_minutes))
+      sleep_duration_minutes: averageDefined(slice.map((day) => daySleep(day, provider)?.duration_minutes))
     });
   }
 
@@ -127,12 +150,18 @@ export function sleepRangeMinutes(sleep?: DashboardSleep): { start: number; end:
 }
 
 function wrapNightMinutes(value: string): number | null {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return null;
+  const match = value.match(/T(\d{2}):(\d{2})/);
+  let minutes: number;
+  if (match) {
+    minutes = Number(match[1]) * 60 + Number(match[2]);
+  } else {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    minutes = date.getUTCHours() * 60 + date.getUTCMinutes();
   }
 
-  let minutes = date.getUTCHours() * 60 + date.getUTCMinutes();
   if (minutes < NIGHT_AXIS_START_MINUTES) {
     minutes += 24 * 60;
   }

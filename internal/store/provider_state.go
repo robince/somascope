@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -132,7 +131,7 @@ func (s *Store) ProviderCredentials(ctx context.Context) ([]ProviderCredential, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []ProviderCredential
 	for rows.Next() {
@@ -301,7 +300,7 @@ func (s *Store) SyncStatesByProvider(ctx context.Context, provider string) ([]Sy
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []SyncStateEntry
 	for rows.Next() {
@@ -348,6 +347,19 @@ func (s *Store) ProviderOverview(ctx context.Context, provider string, configure
 	return out, nil
 }
 
+func (s *Store) ProviderHasStoredData(ctx context.Context, provider string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM raw_documents WHERE provider = ?
+			UNION ALL SELECT 1 FROM daily_records WHERE provider = ?
+			UNION ALL SELECT 1 FROM sleep_sessions WHERE provider = ?
+			UNION ALL SELECT 1 FROM sync_state WHERE provider = ?
+		)
+	`, provider, provider, provider, provider).Scan(&exists)
+	return exists, err
+}
+
 func (s *Store) LatestProviderSyncAt(ctx context.Context, provider string) (string, error) {
 	var syncedAt sql.NullString
 	err := s.db.QueryRowContext(ctx, `
@@ -373,15 +385,4 @@ func nullIfEmpty(value string) any {
 
 func isoNow() string {
 	return time.Now().UTC().Format(time.RFC3339)
-}
-
-func isoIfValid(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339)
-}
-
-func wrapErr(message string, err error) error {
-	return fmt.Errorf("%s: %w", message, err)
 }

@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	AuthorizeURL = "https://cloud.ouraring.com/oauth/authorize"
-	TokenURL     = "https://api.ouraring.com/oauth/token"
-	APIBaseURL   = "https://api.ouraring.com"
+	AuthorizeURL       = "https://cloud.ouraring.com/oauth/authorize"
+	TokenURL           = "https://api.ouraring.com/oauth/token"
+	APIBaseURL         = "https://api.ouraring.com"
+	maxCollectionPages = 500
 )
 
 type AppConfig struct {
@@ -35,15 +36,28 @@ type TokenBundle struct {
 	ExpiresAt    time.Time
 }
 
+type OAuthTokenError struct {
+	StatusCode  int
+	Code        string
+	Description string
+	Body        string
+}
+
+func (e *OAuthTokenError) Error() string {
+	detail := firstNonEmpty(strings.TrimSpace(e.Description), strings.TrimSpace(e.Body), strings.TrimSpace(e.Code))
+	return fmt.Sprintf("oura token request failed with status %d: %s", e.StatusCode, truncate(detail, 512))
+}
+
 type Client struct {
 	HTTPClient  *http.Client
 	RateLimiter RequestLimiter
 }
 
 type RetryConfig struct {
-	MaxAttempts    int
-	OnRetry        func(*APIError, time.Duration)
-	OnUnauthorized func(ctx context.Context, staleToken string) (string, error)
+	MaxAttempts        int
+	OnRetry            func(*APIError, time.Duration)
+	OnUnauthorized     func(ctx context.Context, staleToken string) (string, error)
+	CurrentAccessToken func() string
 }
 
 type CollectionPage struct {
@@ -206,14 +220,21 @@ func (c *Client) tokenRequest(ctx context.Context, values url.Values) (TokenBund
 	if err != nil {
 		return TokenBundle{}, err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return TokenBundle{}, err
+	body, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return TokenBundle{}, readErr
+	}
+	if closeErr != nil {
+		return TokenBundle{}, closeErr
 	}
 	if resp.StatusCode >= 400 {
-		return TokenBundle{}, fmt.Errorf("oura token request failed: %s", strings.TrimSpace(string(body)))
+		var payload struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		return TokenBundle{}, &OAuthTokenError{StatusCode: resp.StatusCode, Code: strings.TrimSpace(payload.Error), Description: strings.TrimSpace(payload.ErrorDescription), Body: strings.TrimSpace(string(body))}
 	}
 
 	var payload struct {
@@ -255,7 +276,8 @@ func (c *Client) FetchCollection(ctx context.Context, accessToken, path string, 
 func (c *Client) FetchCollectionPages(ctx context.Context, accessToken, path string, params url.Values, retry RetryConfig) ([]CollectionPage, error) {
 	var out []CollectionPage
 	var nextToken string
-	for {
+	seenTokens := map[string]struct{}{}
+	for page := 0; page < maxCollectionPages; page++ {
 		pageParams := url.Values{}
 		maps.Copy(pageParams, params)
 		if nextToken != "" {
@@ -280,11 +302,14 @@ func (c *Client) FetchCollectionPages(ctx context.Context, accessToken, path str
 
 		nextToken = strings.TrimSpace(payload.NextToken)
 		if nextToken == "" {
-			break
+			return out, nil
 		}
+		if _, seen := seenTokens[nextToken]; seen {
+			return nil, fmt.Errorf("oura api %s returned a repeated next token", path)
+		}
+		seenTokens[nextToken] = struct{}{}
 	}
-
-	return out, nil
+	return nil, fmt.Errorf("oura api %s exceeded %d pages", path, maxCollectionPages)
 }
 
 func (c *Client) FetchDocument(ctx context.Context, accessToken, path string, retry RetryConfig) (map[string]any, error) {
@@ -314,9 +339,19 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 	}
 
 	currentToken := accessToken
+	if retry.CurrentAccessToken != nil {
+		if token := retry.CurrentAccessToken(); token != "" {
+			currentToken = token
+		}
+	}
 	refreshed := false
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if retry.CurrentAccessToken != nil {
+			if token := retry.CurrentAccessToken(); token != "" {
+				currentToken = token
+			}
+		}
 		reqURL := APIBaseURL + path
 		if len(params) > 0 {
 			reqURL += "?" + params.Encode()
@@ -352,9 +387,12 @@ func (c *Client) doJSON(ctx context.Context, accessToken, path string, params ur
 		}
 
 		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		closeErr := resp.Body.Close()
 		if readErr != nil {
 			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
 		}
 		if resp.StatusCode >= 400 {
 			apiErr := &APIError{

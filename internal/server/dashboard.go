@@ -3,20 +3,24 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/robince/somascope/internal/store"
 )
 
 type dashboardOverview struct {
-	EarliestDate  string                  `json:"earliest_date,omitempty"`
-	LatestDate    string                  `json:"latest_date,omitempty"`
-	AvailableDays int                     `json:"available_days"`
-	Providers     []string                `json:"providers"`
-	ExportURLs    dashboardOverviewExport `json:"export_urls"`
-	Daily         []dashboardOverviewDay  `json:"daily"`
+	EarliestDate       string                  `json:"earliest_date,omitempty"`
+	LatestDate         string                  `json:"latest_date,omitempty"`
+	AvailableDays      int                     `json:"available_days"`
+	Providers          []string                `json:"providers"`
+	ConnectedProviders []string                `json:"connected_providers,omitempty"`
+	AvailableSources   []string                `json:"available_sources,omitempty"`
+	ExportURLs         dashboardOverviewExport `json:"export_urls"`
+	Daily              []dashboardOverviewDay  `json:"daily"`
 }
 
 type dashboardOverviewExport struct {
@@ -27,10 +31,10 @@ type dashboardOverviewExport struct {
 }
 
 type dashboardOverviewDay struct {
-	Date      string                      `json:"date"`
-	Activity  *dashboardOverviewActivity  `json:"activity,omitempty"`
-	Readiness *dashboardOverviewReadiness `json:"readiness,omitempty"`
-	Sleep     *dashboardOverviewSleep     `json:"sleep,omitempty"`
+	Date                string                                 `json:"date"`
+	ActivityByProvider  map[string]*dashboardOverviewActivity  `json:"activity_by_provider,omitempty"`
+	ReadinessByProvider map[string]*dashboardOverviewReadiness `json:"readiness_by_provider,omitempty"`
+	SleepByProvider     map[string]*dashboardOverviewSleep     `json:"sleep_by_provider,omitempty"`
 }
 
 type dashboardOverviewActivity struct {
@@ -122,17 +126,31 @@ func (s *Server) buildDashboardOverview(ctx context.Context) (dashboardOverview,
 		case "daily_record":
 			switch row.RecordKind {
 			case "daily_activity":
-				day.Activity = buildDashboardActivity(row.Summary)
+				if activity := buildDashboardActivity(row.Summary); activity != nil {
+					if day.ActivityByProvider == nil {
+						day.ActivityByProvider = map[string]*dashboardOverviewActivity{}
+					}
+					day.ActivityByProvider[row.Provider] = activity
+				}
 			case "daily_readiness":
-				day.Readiness = buildDashboardReadiness(row.Summary)
+				if readiness := buildDashboardReadiness(row.Summary); readiness != nil {
+					if day.ReadinessByProvider == nil {
+						day.ReadinessByProvider = map[string]*dashboardOverviewReadiness{}
+					}
+					day.ReadinessByProvider[row.Provider] = readiness
+				}
 			}
 		case "sleep_session":
-			state := sleepState[row.LocalDate]
+			stateKey := row.Provider + "\x00" + row.LocalDate
+			state := sleepState[stateKey]
 			if state == nil {
 				state = &dashboardSleepAccumulator{}
-				sleepState[row.LocalDate] = state
+				sleepState[stateKey] = state
 			}
-			accumulateDashboardSleep(day, state, row)
+			if day.SleepByProvider == nil {
+				day.SleepByProvider = map[string]*dashboardOverviewSleep{}
+			}
+			accumulateDashboardSleep(day.SleepByProvider, row.Provider, state, row)
 		}
 	}
 
@@ -153,8 +171,9 @@ func (s *Server) buildDashboardOverview(ctx context.Context) (dashboardOverview,
 	}
 	sort.Strings(providers)
 
+	rawJSONLByProvider := map[string]string{}
 	rawOptionsByProvider := map[string]store.RawExportOptions{}
-	for _, provider := range []string{"oura"} {
+	for _, provider := range knownProviders() {
 		options, err := s.store.RawExportOptions(ctx, provider)
 		if err != nil {
 			return dashboardOverview{}, fmt.Errorf("load raw export options for %s: %w", provider, err)
@@ -163,23 +182,46 @@ func (s *Server) buildDashboardOverview(ctx context.Context) (dashboardOverview,
 			continue
 		}
 		rawOptionsByProvider[provider] = options
+		rawJSONLByProvider[provider] = "/api/v1/export/raw?provider=" + provider + "&format=jsonl"
+	}
+
+	connectedProviders, err := s.connectedProviders(ctx)
+	if err != nil {
+		return dashboardOverview{}, err
 	}
 
 	return dashboardOverview{
-		EarliestDate:  earliestDate,
-		LatestDate:    latestDate,
-		AvailableDays: len(daily),
-		Providers:     providers,
+		EarliestDate:       earliestDate,
+		LatestDate:         latestDate,
+		AvailableDays:      len(daily),
+		Providers:          providers,
+		ConnectedProviders: connectedProviders,
+		AvailableSources:   mergeUniqueStrings(providers, connectedProviders),
 		ExportURLs: dashboardOverviewExport{
-			CanonicalJSONL: "/api/v1/export/canonical?format=jsonl",
-			CanonicalCSV:   "/api/v1/export/canonical?format=csv",
-			RawJSONLByProvider: map[string]string{
-				"oura": "/api/v1/export/raw?provider=oura&format=jsonl",
-			},
+			CanonicalJSONL:       "/api/v1/export/canonical?format=jsonl",
+			CanonicalCSV:         "/api/v1/export/canonical?format=csv",
+			RawJSONLByProvider:   rawJSONLByProvider,
 			RawOptionsByProvider: rawOptionsByProvider,
 		},
 		Daily: daily,
 	}, nil
+}
+
+func (s *Server) connectedProviders(ctx context.Context) ([]string, error) {
+	var connected []string
+	for _, provider := range knownProviders() {
+		connection, err := s.store.ConnectionByProvider(ctx, provider)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load %s connection: %w", provider, err)
+		}
+		if connection.Status == "connected" && strings.TrimSpace(connection.AccessToken) != "" {
+			connected = append(connected, provider)
+		}
+	}
+	return connected, nil
 }
 
 func buildDashboardActivity(raw json.RawMessage) *dashboardOverviewActivity {
@@ -194,11 +236,11 @@ func buildDashboardActivity(raw json.RawMessage) *dashboardOverviewActivity {
 		ActiveCalories:            intValue(values, "active_calories"),
 		TotalCalories:             intValue(values, "total_calories"),
 		EquivalentWalkingDistance: intValue(values, "equivalent_walking_distance"),
-		HighActivityMinutes:       secondsToMinutesValue(values, "high_activity_time"),
-		MediumActivityMinutes:     secondsToMinutesValue(values, "medium_activity_time"),
-		LowActivityMinutes:        secondsToMinutesValue(values, "low_activity_time"),
-		RestingMinutes:            secondsToMinutesValue(values, "resting_time"),
-		NonWearMinutes:            secondsToMinutesValue(values, "non_wear_time"),
+		HighActivityMinutes:       firstMinutesValue(values, "high_activity_minutes", "high_activity_time"),
+		MediumActivityMinutes:     firstMinutesValue(values, "medium_activity_minutes", "medium_activity_time"),
+		LowActivityMinutes:        firstMinutesValue(values, "low_activity_minutes", "low_activity_time"),
+		RestingMinutes:            firstMinutesValue(values, "resting_minutes", "resting_time"),
+		NonWearMinutes:            firstMinutesValue(values, "non_wear_minutes", "non_wear_time"),
 	}
 }
 
@@ -214,19 +256,17 @@ func buildDashboardReadiness(raw json.RawMessage) *dashboardOverviewReadiness {
 	}
 }
 
-func accumulateDashboardSleep(day *dashboardOverviewDay, state *dashboardSleepAccumulator, row store.CanonicalExportRow) {
+func accumulateDashboardSleep(byProvider map[string]*dashboardOverviewSleep, provider string, state *dashboardSleepAccumulator, row store.CanonicalExportRow) {
 	duration := valueOrZero(row.DurationMinutes)
-	if row.IsNap {
-		if day.Sleep == nil {
-			day.Sleep = &dashboardOverviewSleep{}
-		}
-		day.Sleep.NapsCount++
-		day.Sleep.NapMinutes += duration
-		return
+	sleep := byProvider[provider]
+	if sleep == nil {
+		sleep = &dashboardOverviewSleep{}
+		byProvider[provider] = sleep
 	}
-
-	if day.Sleep == nil {
-		day.Sleep = &dashboardOverviewSleep{}
+	if row.IsNap {
+		sleep.NapsCount++
+		sleep.NapMinutes += duration
+		return
 	}
 
 	if duration < state.primaryDuration {
@@ -237,18 +277,53 @@ func accumulateDashboardSleep(day *dashboardOverviewDay, state *dashboardSleepAc
 	metrics := decodeJSONObject(row.Metrics)
 	stages := decodeJSONObject(row.Stages)
 
-	day.Sleep.StartTime = row.StartTime
-	day.Sleep.EndTime = row.EndTime
-	day.Sleep.DurationMinutes = row.DurationMinutes
-	day.Sleep.TimeInBedMinutes = row.TimeInBedMinutes
-	day.Sleep.EfficiencyPercent = row.EfficiencyPercent
-	day.Sleep.AverageHeartRate = floatValue(metrics, "average_heart_rate")
-	day.Sleep.AverageHRV = floatValue(metrics, "average_hrv")
-	day.Sleep.DeepMinutes = secondsToMinutesValue(stages, "deep_sleep_duration")
-	day.Sleep.LightMinutes = secondsToMinutesValue(stages, "light_sleep_duration")
-	day.Sleep.REMMinutes = secondsToMinutesValue(stages, "rem_sleep_duration")
-	day.Sleep.AwakeMinutes = secondsToMinutesValue(stages, "awake_time")
-	day.Sleep.SleepType = stringValue(metrics, "type")
+	sleep.StartTime = row.StartTime
+	sleep.EndTime = row.EndTime
+	sleep.DurationMinutes = row.DurationMinutes
+	sleep.TimeInBedMinutes = row.TimeInBedMinutes
+	sleep.EfficiencyPercent = row.EfficiencyPercent
+	sleep.AverageHeartRate = floatValue(metrics, "average_heart_rate")
+	sleep.AverageHRV = floatValue(metrics, "average_hrv")
+	sleep.DeepMinutes = firstMinutesValue(stages, "deep_minutes", "deep_sleep_duration")
+	sleep.LightMinutes = firstMinutesValue(stages, "light_minutes", "light_sleep_duration")
+	sleep.REMMinutes = firstMinutesValue(stages, "rem_minutes", "rem_sleep_duration")
+	sleep.AwakeMinutes = firstMinutesValue(stages, "awake_minutes", "awake_time")
+	sleep.SleepType = firstNonEmptyString(stringValue(metrics, "type"), stringValue(metrics, "sleep_type"))
+}
+
+func firstMinutesValue(values map[string]any, minuteKey, secondKey string) *int {
+	if value := intValue(values, minuteKey); value != nil {
+		return value
+	}
+	return secondsToMinutesValue(values, secondKey)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func mergeUniqueStrings(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, group := range groups {
+		for _, value := range group {
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func decodeJSONObject(raw json.RawMessage) map[string]any {

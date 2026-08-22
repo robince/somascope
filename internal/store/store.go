@@ -27,21 +27,21 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 	db.SetMaxIdleConns(1)
 
 	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode = WAL;"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000;"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON;"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	store := &Store{db: db}
 	if err := store.Migrate(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -117,7 +117,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 
 		if _, err := tx.ExecContext(ctx, migration.body); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %s: %w", migration.name, err)
 		}
 
@@ -125,7 +125,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			"INSERT INTO schema_migrations(version, name) VALUES(?, ?)",
 			migration.version, migration.name,
 		); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", migration.name, err)
 		}
 
@@ -153,7 +153,7 @@ func (s *Store) appliedVersions(ctx context.Context) (map[int]bool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query applied migrations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := map[int]bool{}
 	for rows.Next() {

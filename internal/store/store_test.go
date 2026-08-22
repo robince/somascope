@@ -5,7 +5,17 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func cleanupStore(t *testing.T, closer interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+}
 
 func TestOpenAppliesInitialMigrations(t *testing.T) {
 	ctx := context.Background()
@@ -15,7 +25,7 @@ func TestOpenAppliesInitialMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	version, err := store.SchemaVersion(ctx)
 	if err != nil {
@@ -34,7 +44,7 @@ func TestCanonicalExportRowsIncludesRecordsAndSleep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	if err := store.UpsertDailyRecord(ctx, DailyRecord{
 		Provider:     "oura",
@@ -87,7 +97,7 @@ func TestRawExportRowsFiltersByProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	if _, err := store.UpsertRawDocument(ctx, RawDocument{
 		Provider:     "oura",
@@ -154,7 +164,7 @@ func TestRawExportRowsSupportsDateAndKindFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	cleanupStore(t, store)
 
 	for _, doc := range []RawDocument{
 		{
@@ -206,5 +216,55 @@ func TestRawExportRowsSupportsDateAndKindFilters(t *testing.T) {
 	}
 	if rows[0].DocumentKind != "daily_readiness" || rows[1].DocumentKind != "personal_info" {
 		t.Fatalf("unexpected filtered raw export rows: %+v", rows)
+	}
+}
+
+func TestMarkRunningSyncRunsInterruptedDoesNotDeadlock(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "somascope.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cleanupStore(t, store)
+
+	if err := store.CreateSyncRun(ctx, SyncRun{
+		ID:        "sync_running",
+		Provider:  "google_health",
+		Status:    "running",
+		Mode:      "backfill",
+		StartedAt: "2026-08-19T10:00:22Z",
+		UpdatedAt: "2026-08-19T10:01:42Z",
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if err := store.UpsertSyncRunEntity(ctx, SyncRunEntity{
+		RunID:      "sync_running",
+		EntityKind: "heartrate",
+		Status:     "running",
+		UpdatedAt:  "2026-08-19T10:01:42Z",
+	}); err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- store.MarkRunningSyncRunsInterrupted(ctx, "sync interrupted because somascope restarted")
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("mark interrupted: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("MarkRunningSyncRunsInterrupted deadlocked")
+	}
+
+	run, err := store.LatestFinishedSyncRunByProvider(ctx, "google_health")
+	if err != nil {
+		t.Fatalf("load finished run: %v", err)
+	}
+	if run.Status != "interrupted" {
+		t.Fatalf("expected interrupted run, got %s", run.Status)
 	}
 }

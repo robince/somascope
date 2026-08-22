@@ -24,6 +24,10 @@ var (
 )
 
 func main() {
+	if handleVersionCommand(os.Args[1:], os.Stdout) {
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -34,14 +38,22 @@ func main() {
 	}
 	logFile := configureLogging(cfg.LogsDir)
 	if logFile != nil {
-		defer logFile.Close()
+		defer func() {
+			if err := logFile.Close(); err != nil {
+				log.Printf("warning: close log file: %v", err)
+			}
+		}()
 	}
 
 	db, err := store.Open(context.Background(), cfg.DBPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("warning: close database: %v", err)
+		}
+	}()
 
 	srv, err := server.New(cfg, db, server.VersionInfo{
 		Version:   version,
@@ -93,4 +105,27 @@ func configureLogging(logsDir string) *os.File {
 	}
 	log.SetOutput(io.MultiWriter(os.Stdout, file))
 	return file
+}
+
+func handleVersionCommand(args []string, w io.Writer) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	switch args[0] {
+	case "version", "--version", "-version":
+		printVersion(w)
+		return true
+	default:
+		return false
+	}
+}
+
+func printVersion(w io.Writer) {
+	if buildDate == "" {
+		_, _ = fmt.Fprintf(w, "somascope %s (%s)\n", version, commit)
+		return
+	}
+
+	_, _ = fmt.Fprintf(w, "somascope %s (%s) %s\n", version, commit, buildDate)
 }

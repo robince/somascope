@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/robince/somascope/internal/config"
+	"github.com/robince/somascope/internal/googlehealth"
 	"github.com/robince/somascope/internal/oura"
 	"github.com/robince/somascope/internal/providersync"
 	"github.com/robince/somascope/internal/settings"
@@ -27,15 +28,16 @@ type VersionInfo struct {
 }
 
 type Server struct {
-	cfg        config.Config
-	version    VersionInfo
-	spaFS      fs.FS
-	spaHandler http.Handler
-	settings   *settings.Store
-	store      *store.Store
-	oura       *oura.Client
-	syncs      *providersync.Manager
-	mux        *http.ServeMux
+	cfg          config.Config
+	version      VersionInfo
+	spaFS        fs.FS
+	spaHandler   http.Handler
+	settings     *settings.Store
+	store        *store.Store
+	oura         *oura.Client
+	googleHealth *googlehealth.Client
+	syncs        *providersync.Manager
+	mux          *http.ServeMux
 }
 
 func New(cfg config.Config, appStore *store.Store, version VersionInfo) (*Server, error) {
@@ -45,14 +47,15 @@ func New(cfg config.Config, appStore *store.Store, version VersionInfo) (*Server
 	}
 
 	s := &Server{
-		cfg:        cfg,
-		version:    version,
-		spaFS:      dist,
-		spaHandler: http.FileServerFS(dist),
-		settings:   settings.NewStore(appStore),
-		store:      appStore,
-		oura:       oura.NewClient(nil),
-		mux:        http.NewServeMux(),
+		cfg:          cfg,
+		version:      version,
+		spaFS:        dist,
+		spaHandler:   http.FileServerFS(dist),
+		settings:     settings.NewStore(appStore),
+		store:        appStore,
+		oura:         oura.NewClient(nil),
+		googleHealth: googlehealth.NewClient(nil),
+		mux:          http.NewServeMux(),
 	}
 	syncs, err := providersync.NewManager(appStore)
 	if err != nil {
@@ -81,6 +84,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/export/raw", s.handleExportRaw)
 	s.mux.HandleFunc("GET /api/v1/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/v1/settings", s.handlePutSettings)
+	s.mux.HandleFunc("GET /api/v1/providers/{provider}/status", s.handleProviderStatus)
+	s.mux.HandleFunc("GET /api/v1/providers/{provider}/recent", s.handleProviderRecent)
+	s.mux.HandleFunc("POST /api/v1/providers/{provider}/auth/start", s.handleProviderAuthStart)
+	s.mux.HandleFunc("GET /oauth/{provider}/callback", s.handleProviderCallback)
+	s.mux.HandleFunc("POST /api/v1/providers/{provider}/sync", s.handleProviderSync)
+	s.mux.HandleFunc("POST /api/v1/sync", s.handleSyncAll)
 	s.mux.HandleFunc("GET /api/v1/providers/oura/status", s.handleOuraStatus)
 	s.mux.HandleFunc("GET /api/v1/providers/oura/recent", s.handleOuraRecent)
 	s.mux.HandleFunc("POST /api/v1/providers/oura/auth/start", s.handleOuraAuthStart)
@@ -111,7 +120,7 @@ func (s *Server) handleSpec(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"v1_scope": []string{
 			"single-user local app",
-			"fitbit and oura",
+			"oura and google health",
 			"daily summary first",
 			"raw and structured export",
 			"embedded frontend for distribution",
@@ -391,12 +400,14 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 		http.Error(w, "index.html missing", http.StatusInternalServerError)
 		return
 	}
-	defer file.Close()
-
 	data, err := io.ReadAll(file)
+	closeErr := file.Close()
 	if err != nil {
 		http.Error(w, "failed to read index.html", http.StatusInternalServerError)
 		return
+	}
+	if closeErr != nil {
+		log.Printf("warning: failed closing %s: %v", name, closeErr)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

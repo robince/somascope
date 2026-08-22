@@ -1,16 +1,17 @@
 <script lang="ts">
-  import type { AppInfo, OuraRecent, OuraStatus, ProviderSettings } from "./types";
+  import type { AppInfo, ProviderName, ProviderRecent, ProviderSettings, ProviderStatus } from "./types";
+  import { providerLabel, providerSubtitle } from "./types";
 
   export let appInfo: AppInfo | null = null;
   export let providers: ProviderSettings[] = [];
-  export let ouraStatus: OuraStatus | null = null;
-  export let ouraRecent: OuraRecent = { daily_records: [], sleep_sessions: [] };
+  export let statuses: Partial<Record<ProviderName, ProviderStatus | null>> = {};
+  export let recents: Partial<Record<ProviderName, ProviderRecent>> = {};
+  export let busy: Partial<Record<ProviderName, boolean>> = {};
   export let userTimezone = "";
   export let loading = false;
   export let statusLoading = false;
-  export let statusError = "";
+  export let statusErrors: Partial<Record<ProviderName, string>> = {};
   export let saving = false;
-  export let ouraBusy = false;
   export let syncStartDate = "";
   export let dirty = false;
   export let error = "";
@@ -18,14 +19,12 @@
   export let onReset: () => void = () => {};
   export let onSave: () => void = () => {};
   export let onRefresh: () => void = () => {};
-  export let onConnectOura: () => void = () => {};
-  export let onSyncOura: () => void = () => {};
-  export let onSyncOuraFromDate: () => void = () => {};
+  export let onConnect: (provider: ProviderName) => void = () => {};
+  export let onSync: (provider: ProviderName) => void = () => {};
+  export let onSyncFromDate: (provider: ProviderName) => void = () => {};
   export let onSyncStartDateInput: (value: string) => void = () => {};
   export let onTimezoneInput: (value: string) => void = () => {};
   export let onProviderInput: (index: number, field: keyof ProviderSettings, value: string | boolean) => void = () => {};
-
-  const showFitbitCredentialCard = false;
   const ouraApplicationURL = "https://developer.ouraring.com/applications";
   const ouraApplicationFields = [
     { label: "Name", value: "My Somastat" },
@@ -36,6 +35,14 @@
     { label: "Terms of service", value: "https://github.com/robince/somascope" },
     { label: "Redirect URI", value: "http://localhost:18080/oauth/oura/callback" },
     { label: "Scopes", value: "Select all" }
+  ];
+  const googleHealthConsoleURL = "https://console.cloud.google.com/apis/library/health.googleapis.com";
+  const googleHealthFields = [
+    { label: "API", value: "Google Health API" },
+    { label: "OAuth client type", value: "Web application" },
+    { label: "Redirect URI", value: "http://localhost:18080/oauth/google_health/callback" },
+    { label: "Publishing status", value: "Testing, add yourself as a test user" },
+    { label: "Scopes", value: "Required Google Health readonly scopes (activity, sleep, vitals, nutrition, profile, settings, ECG, IRN)" }
   ];
 
   function numberValue(value: unknown): string {
@@ -76,7 +83,7 @@
     onSyncStartDateInput((event.currentTarget as HTMLInputElement).value);
   }
 
-  function connectionLabel(status: OuraStatus | null, loadingStatus: boolean, statusMessage: string): string {
+  function connectionLabel(status: ProviderStatus | null | undefined, loadingStatus: boolean, statusMessage: string): string {
     if (status?.connected) {
       return "Connected";
     }
@@ -116,50 +123,42 @@
     </article>
 
     <aside class="panel side-panel">
-      <p class="eyebrow">Oura status</p>
+      <p class="eyebrow">Provider status</p>
       <dl class="stack">
-        <div class="stack-row">
-          <dt>Connection</dt>
-          <dd>{connectionLabel(ouraStatus, statusLoading, statusError)}</dd>
-        </div>
-        <div class="stack-row">
-          <dt>Daily records</dt>
-          <dd>{ouraStatus?.daily_record_count ?? 0}</dd>
-        </div>
-        <div class="stack-row">
-          <dt>Sleep sessions</dt>
-          <dd>{ouraStatus?.sleep_session_count ?? 0}</dd>
-        </div>
-        <div class="stack-row">
-          <dt>Last sync</dt>
-          <dd>{ouraStatus?.last_sync_at ?? "Not synced yet"}</dd>
-        </div>
-        <div class="stack-row">
-          <dt>Run state</dt>
-          <dd>{ouraStatus?.current_run?.status ?? ouraStatus?.last_completed_run?.status ?? "Idle"}</dd>
-        </div>
+        {#each providers as provider}
+          {@const status = statuses[provider.provider]}
+          {@const providerStatusError = statusErrors[provider.provider] ?? ""}
+          <div class="stack-row">
+            <dt>{providerLabel(provider.provider)}</dt>
+            <dd>{connectionLabel(status, statusLoading, providerStatusError)} · {status?.daily_record_count ?? 0} days</dd>
+          </div>
+        {/each}
       </dl>
     </aside>
   </div>
 
-  <article class="panel sync-panel" id="oura-sync">
+  {#each providers as provider}
+  {@const status = statuses[provider.provider]}
+  {@const providerStatusError = statusErrors[provider.provider] ?? ""}
+  {@const providerBusy = Boolean(busy[provider.provider])}
+  <article class="panel sync-panel" id={`${provider.provider}-sync`}>
     <div class="section-head">
       <div>
         <p class="eyebrow">Sync controls</p>
-        <h2>Backfill Oura data</h2>
+        <h2>Backfill {providerLabel(provider.provider)}</h2>
       </div>
     </div>
 
     {#if statusLoading}
-      <p class="status-copy">Checking local Oura connection status...</p>
-    {:else if statusError}
+      <p class="status-copy">Checking local {providerLabel(provider.provider)} connection status...</p>
+    {:else if providerStatusError}
       <p class="status-copy error">
-        Oura status could not be loaded from the local app. {statusError}
+        {providerLabel(provider.provider)} status could not be loaded from the local app. {providerStatusError}
       </p>
-    {:else if !ouraStatus?.connected}
+    {:else if !status?.connected}
       <p class="status-copy warning">
-        Oura sync actions are disabled until this app is connected to Oura. Save local credentials if needed,
-        then use <strong>Connect Oura</strong> below.
+        Sync actions stay disabled until {providerLabel(provider.provider)} is connected. Save credentials if needed,
+        then use <strong>Connect</strong> below.
       </p>
     {/if}
 
@@ -178,15 +177,15 @@
         <button
           class="button button-ghost"
           type="button"
-          onclick={onSyncOuraFromDate}
-          disabled={loading || saving || ouraBusy || statusLoading || !ouraStatus?.connected || !syncStartDate}
+          onclick={() => onSyncFromDate(provider.provider)}
+          disabled={loading || saving || providerBusy || statusLoading || !status?.connected || !syncStartDate}
         >
-          {#if ouraBusy}
+          {#if providerBusy}
             Running...
           {:else if statusLoading}
             Checking connection...
-          {:else if !ouraStatus?.connected}
-            Connect Oura first
+          {:else if !status?.connected}
+            Connect first
           {:else if !syncStartDate}
             Choose a start date
           {:else}
@@ -196,35 +195,35 @@
       </article>
     </div>
 
-    {#if ouraStatus?.current_run}
+    {#if status?.current_run}
       <div class="sync-meta">
         <p class="eyebrow">Current run</p>
         <div class="sync-meta-grid">
           <article class="sync-meta-card">
             <strong>Status</strong>
-            <span>{ouraStatus.current_run.status}</span>
+            <span>{status.current_run.status}</span>
           </article>
           <article class="sync-meta-card">
             <strong>Rows</strong>
-            <span>{ouraStatus.current_run.rows_written}</span>
+            <span>{status.current_run.rows_written}</span>
           </article>
           <article class="sync-meta-card">
             <strong>Updated</strong>
-            <span>{ouraStatus.current_run.updated_at}</span>
+            <span>{status.current_run.updated_at}</span>
           </article>
           <article class="sync-meta-card">
             <strong>Chunk</strong>
-            <span>{entityLabel(ouraStatus.current_run.current_entity_kind)} {ouraStatus.current_run.current_chunk_start_date} {ouraStatus.current_run.current_chunk_end_date ? `to ${ouraStatus.current_run.current_chunk_end_date}` : ""}</span>
+            <span>{entityLabel(status.current_run.current_entity_kind)} {status.current_run.current_chunk_start_date} {status.current_run.current_chunk_end_date ? `to ${status.current_run.current_chunk_end_date}` : ""}</span>
           </article>
           <article class="sync-meta-card">
             <strong>Retries</strong>
-            <span>{ouraStatus.current_run.retry_count}</span>
+            <span>{status.current_run.retry_count}</span>
           </article>
         </div>
 
-        {#if ouraStatus.current_run.entities?.length}
+        {#if status.current_run.entities?.length}
           <div class="cursor-list">
-            {#each ouraStatus.current_run.entities as entity}
+            {#each status.current_run.entities as entity}
               <div class="cursor-row">
                 <span>{entityLabel(entity.entity_kind)} ({entity.status})</span>
                 <span>
@@ -240,41 +239,41 @@
       </div>
     {/if}
 
-    {#if ouraStatus?.last_error?.message}
+    {#if status?.last_error?.message}
       <p class="status-copy error">
-        {entityLabel(ouraStatus.last_error.entity_kind)} failed
-        {#if ouraStatus.last_error.chunk_start_date}
-          on {ouraStatus.last_error.chunk_start_date}{#if ouraStatus.last_error.chunk_end_date} to {ouraStatus.last_error.chunk_end_date}{/if}
+        {entityLabel(status.last_error.entity_kind)} failed
+        {#if status.last_error.chunk_start_date}
+          on {status.last_error.chunk_start_date}{#if status.last_error.chunk_end_date} to {status.last_error.chunk_end_date}{/if}
         {/if}
-        : {ouraStatus.last_error.message}
+        : {status.last_error.message}
       </p>
     {/if}
 
-    {#if ouraStatus?.last_completed_run}
+    {#if status?.last_completed_run}
       <div class="sync-meta">
         <p class="eyebrow">Last finished run</p>
         <div class="sync-meta-grid">
           <article class="sync-meta-card">
             <strong>Status</strong>
-            <span>{ouraStatus.last_completed_run.status}</span>
+            <span>{status.last_completed_run.status}</span>
           </article>
           <article class="sync-meta-card">
             <strong>Range</strong>
-            <span>{ouraStatus.last_completed_run.effective_start_date ?? "--"} to {ouraStatus.last_completed_run.effective_end_date ?? "--"}</span>
+            <span>{status.last_completed_run.effective_start_date ?? "--"} to {status.last_completed_run.effective_end_date ?? "--"}</span>
           </article>
           <article class="sync-meta-card">
             <strong>Rows</strong>
-            <span>{ouraStatus.last_completed_run.rows_written}</span>
+            <span>{status.last_completed_run.rows_written}</span>
           </article>
           <article class="sync-meta-card">
             <strong>Finished</strong>
-            <span>{ouraStatus.last_completed_run.finished_at ?? ouraStatus.last_completed_run.updated_at}</span>
+            <span>{status.last_completed_run.finished_at ?? status.last_completed_run.updated_at}</span>
           </article>
         </div>
 
-        {#if ouraStatus.sync_state?.length}
+        {#if status.sync_state?.length}
           <div class="cursor-list">
-            {#each ouraStatus.sync_state as entry}
+            {#each status.sync_state as entry}
               <div class="cursor-row">
                 <span>{entry.entity_kind.replaceAll("_", " ")}</span>
                 <span>{entry.cursor_value}</span>
@@ -285,6 +284,7 @@
       </div>
     {/if}
   </article>
+  {/each}
 
   <article class="panel settings-panel">
     <div class="section-head">
@@ -304,8 +304,8 @@
 
     <p class="helper">
       Secrets are only entered when you want to write them. After save, somascope treats them as present locally
-      but does not render them back into the page. For Oura, the next step is browser authorization against your
-      local callback and then a manual sync.
+      but does not render them back into the page. Next, authorize in the browser against the local callback,
+      then run a sync. Google Health refresh tokens expire after 7 days while the Cloud project is in Testing.
     </p>
 
     <div class="timezone-row">
@@ -325,17 +325,58 @@
     {:else}
       <div class="provider-grid">
         {#each providers as provider, index}
-          {#if provider.provider !== "fitbit" || showFitbitCredentialCard}
+          {@const status = statuses[provider.provider]}
+          {@const providerStatusError = statusErrors[provider.provider] ?? ""}
+          {@const providerBusy = Boolean(busy[provider.provider])}
           <article class="provider-card">
             <div class="provider-head">
               <div>
-                <h3>{provider.provider === "fitbit" ? "Fitbit" : "Oura"}</h3>
+                <h3>{providerLabel(provider.provider)}</h3>
+                {#if providerSubtitle(provider.provider)}
+                  <p class="provider-subtitle">{providerSubtitle(provider.provider)}</p>
+                {/if}
                 <p>{provider.notes}</p>
               </div>
               <span class:badge-on={provider.configured} class="badge">
                 {provider.configured ? "Configured" : "Not configured"}
               </span>
             </div>
+
+            {#if provider.provider === "google_health"}
+              <div class="setup-guide">
+                <div class="setup-guide-head">
+                  <div>
+                    <p class="setup-guide-kicker">Google Health setup</p>
+                    <h4>Create a Google Cloud OAuth client first</h4>
+                  </div>
+                  <a class="button button-ghost" href={googleHealthConsoleURL} target="_blank" rel="noreferrer">Open Google Cloud</a>
+                </div>
+
+                <div class="setup-guide-grid">
+                  <div class="setup-copy">
+                    <p class="setup-copy-intro">
+                      Enable the Google Health API, create a Web application OAuth client, add yourself as a test user,
+                      then paste the client ID and secret below.
+                    </p>
+                    <ol class="setup-steps">
+                      <li>Enable Google Health API in a Google Cloud project.</li>
+                      <li>Create an OAuth client of type Web application with the redirect URI shown here.</li>
+                      <li>Keep the consent screen in Testing and add your Google account as a test user.</li>
+                      <li>Save the credentials locally, then use <strong>Connect Google Health</strong>.</li>
+                    </ol>
+                  </div>
+
+                  <dl class="setup-values">
+                    {#each googleHealthFields as field}
+                      <div class="setup-value">
+                        <dt>{field.label}</dt>
+                        <dd><code>{field.value}</code></dd>
+                      </div>
+                    {/each}
+                  </dl>
+                </div>
+              </div>
+            {/if}
 
             {#if provider.provider === "oura"}
               <div class="setup-guide">
@@ -403,31 +444,30 @@
               </label>
             </div>
 
-            {#if provider.provider === "oura"}
-              <div class="provider-actions">
+            <div class="provider-actions">
                 <button
                   class="button button-ghost"
                   type="button"
                   onclick={onRefresh}
-                  disabled={loading || saving || ouraBusy}
+                  disabled={loading || saving}
                 >
                   Refresh status
                 </button>
                 <button
                   class="button button-ghost"
                   type="button"
-                  onclick={onConnectOura}
-                  disabled={loading || saving || ouraBusy || !provider.configured}
+                  onclick={() => onConnect(provider.provider)}
+                  disabled={loading || saving || providerBusy || !provider.configured}
                 >
-                  {ouraBusy ? "Working..." : "Connect Oura"}
+                  {providerBusy ? "Working..." : status?.status === "needs_reauth" ? `Reconnect ${providerLabel(provider.provider)}` : `Connect ${providerLabel(provider.provider)}`}
                 </button>
                 <button
                   class="button button-primary"
                   type="button"
-                  onclick={onSyncOura}
-                  disabled={loading || saving || ouraBusy || statusLoading || !ouraStatus?.connected}
+                  onclick={() => onSync(provider.provider)}
+                  disabled={loading || saving || providerBusy || statusLoading || !status?.connected}
                 >
-                  {#if ouraBusy}
+                  {#if providerBusy}
                     Working...
                   {:else if statusLoading}
                     Checking connection...
@@ -438,17 +478,17 @@
               </div>
 
               {#if statusLoading}
-                <p class="status-copy">Checking stored Oura connection...</p>
-              {:else if statusError}
+                <p class="status-copy">Checking stored {providerLabel(provider.provider)} connection...</p>
+              {:else if providerStatusError}
                 <p class="status-copy warning">Connection status is currently unavailable. Use Refresh status to re-check the local app.</p>
               {:else if !provider.configured}
-                <p class="status-copy warning">Save your local Oura client ID and secret before connecting.</p>
-              {:else if !ouraStatus?.connected}
-                <p class="status-copy warning">Credentials are saved locally. Use Connect Oura to finish authentication.</p>
+                <p class="status-copy warning">Save your local client ID and secret before connecting.</p>
+              {:else if status?.status === "needs_reauth"}
+                <p class="status-copy warning">The {providerLabel(provider.provider)} token expired or was revoked. Reconnect to continue syncing.</p>
+              {:else if !status?.connected}
+                <p class="status-copy warning">Credentials are saved locally. Use Connect to finish authentication.</p>
               {/if}
-            {/if}
           </article>
-          {/if}
         {/each}
       </div>
     {/if}
@@ -465,18 +505,24 @@
     <div class="section-head">
       <div>
         <p class="eyebrow">Recent data</p>
-        <h2>Last Oura data</h2>
+        <h2>Last synced data</h2>
       </div>
     </div>
 
+    {#each providers as provider}
+    {@const recent = recents[provider.provider] ?? { daily_records: [], sleep_sessions: [] }}
+    <h3 class="recent-provider">{providerLabel(provider.provider)}</h3>
+    {#if providerSubtitle(provider.provider)}
+      <p class="provider-subtitle">{providerSubtitle(provider.provider)}</p>
+    {/if}
     <div class="data-grid">
       <article class="data-card">
         <strong>Daily records</strong>
-        {#if ouraRecent.daily_records.length === 0}
-          <p class="empty-copy">No daily records yet. Connect Oura and run a sync.</p>
+        {#if recent.daily_records.length === 0}
+          <p class="empty-copy">No daily records yet. Connect {providerLabel(provider.provider)} and run a sync.</p>
         {:else}
           <div class="record-list">
-            {#each ouraRecent.daily_records as record}
+            {#each recent.daily_records as record}
               <div class="record-row">
                 <div>
                   <p class="record-kind">{record.record_kind.replaceAll("_", " ")}</p>
@@ -501,11 +547,11 @@
 
       <article class="data-card">
         <strong>Sleep sessions</strong>
-        {#if ouraRecent.sleep_sessions.length === 0}
+        {#if recent.sleep_sessions.length === 0}
           <p class="empty-copy">No sleep sessions yet. The first sync will populate them.</p>
         {:else}
           <div class="record-list">
-            {#each ouraRecent.sleep_sessions as session}
+            {#each recent.sleep_sessions as session}
               <div class="record-row">
                 <div>
                   <p class="record-kind">{session.is_nap ? "nap" : "sleep"}</p>
@@ -521,6 +567,7 @@
         {/if}
       </article>
     </div>
+    {/each}
   </article>
 </section>
 
@@ -585,6 +632,12 @@
   .stack-row dd {
     color: var(--muted);
     line-height: 1.55;
+  }
+
+  .provider-subtitle {
+    margin: 2px 0 0;
+    color: var(--muted);
+    line-height: 1.45;
   }
 
   .facts {

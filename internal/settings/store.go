@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/robince/somascope/internal/googlehealth"
 	appstore "github.com/robince/somascope/internal/store"
 )
 
@@ -71,6 +73,10 @@ func (s *Store) Load() (Settings, error) {
 	}
 
 	ctx := context.Background()
+	if err := s.migrateLegacyFitbitCredentials(ctx); err != nil {
+		return Settings{}, err
+	}
+
 	userTimezone, err := s.app.AppSetting(ctx, userTimezoneKey)
 	if errors.Is(err, appstore.ErrNotFound) || userTimezone == "" {
 		userTimezone = defaultTimezone()
@@ -160,10 +166,10 @@ func (s *Store) Update(next Settings) (Settings, error) {
 func defaultProviders() []ProviderConfig {
 	return []ProviderConfig{
 		{
-			Provider:      "fitbit",
-			RedirectURI:   "http://localhost:18080/oauth/fitbit/callback",
-			DefaultScopes: "activity heartrate sleep profile",
-			Notes:         "Bring your own Fitbit developer app credentials. Secrets stay local on this device.",
+			Provider:      "google_health",
+			RedirectURI:   "http://localhost:18080/oauth/google_health/callback",
+			DefaultScopes: googlehealth.DefaultReadonlyScopeString(),
+			Notes:         "Bring your own Google Cloud OAuth client. Secrets stay local on this device.",
 		},
 		{
 			Provider:      "oura",
@@ -172,6 +178,48 @@ func defaultProviders() []ProviderConfig {
 			Notes:         "Bring your own Oura developer app credentials. Secrets stay local on this device.",
 		},
 	}
+}
+
+func (s *Store) migrateLegacyFitbitCredentials(ctx context.Context) error {
+	legacy, err := s.app.ProviderCredentialByProvider(ctx, "fitbit")
+	if errors.Is(err, appstore.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !providerConfigured(legacy) {
+		return nil
+	}
+
+	_, err = s.app.ProviderCredentialByProvider(ctx, "google_health")
+	if err != nil && !errors.Is(err, appstore.ErrNotFound) {
+		return err
+	}
+	if err == nil {
+		return nil
+	}
+
+	migrated := providerToCredential(mustDefaultProvider("google_health"))
+	migrated.Notes = firstNonEmpty(legacy.Notes, migrated.Notes)
+	return s.app.UpsertProviderCredential(ctx, migrated)
+}
+
+func mustDefaultProvider(name string) ProviderConfig {
+	provider, ok := findDefaultProvider(name)
+	if !ok {
+		return ProviderConfig{Provider: name}
+	}
+	return provider
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func findDefaultProvider(name string) (ProviderConfig, bool) {
@@ -219,8 +267,8 @@ func normalizeCredential(provider string, stored appstore.ProviderCredential) ap
 
 func legacyDefaultRedirectURI(provider string) string {
 	switch provider {
-	case "fitbit":
-		return "http://127.0.0.1:18080/oauth/fitbit/callback"
+	case "google_health":
+		return "http://127.0.0.1:18080/oauth/google_health/callback"
 	case "oura":
 		return "http://127.0.0.1:18080/oauth/oura/callback"
 	default:
