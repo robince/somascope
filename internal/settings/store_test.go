@@ -233,7 +233,7 @@ func TestLoadMigratesLegacyFitbitCredentials(t *testing.T) {
 	if private.ClientSecret != "" {
 		t.Fatalf("expected empty google_health secret, got %q", private.ClientSecret)
 	}
-	if private.Notes != "legacy note" {
+	if private.Notes != "old fitbit app" {
 		t.Fatalf("expected legacy notes to be preserved, got %q", private.Notes)
 	}
 }
