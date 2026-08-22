@@ -381,7 +381,7 @@ func skipRawError(err error) bool {
 		return false
 	}
 	switch apiErr.StatusCode {
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound:
+	case http.StatusForbidden, http.StatusNotFound:
 		return true
 	default:
 		return false
