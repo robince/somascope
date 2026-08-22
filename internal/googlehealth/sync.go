@@ -411,7 +411,7 @@ func syncRawArchives(ctx context.Context, st *store.Store, client *Client, acces
 			}
 			rowsWritten := 0
 			for i, page := range pages {
-				if _, err := archiveRaw(ctx, st, entity.kind, fmt.Sprintf("%s:list:%s:%d", entity.dataType, chunk.Start.Format(dateLayout), i), chunk, page.RawBody, fetchedAt); err != nil {
+				if _, err := archiveRaw(ctx, st, entity.kind, rawListDocumentKey(entity.dataType, chunk, i), chunk, page.RawBody, fetchedAt); err != nil {
 					return err
 				}
 				rowsWritten += len(page.DataPoints)
@@ -432,6 +432,10 @@ func syncRawArchives(ctx context.Context, st *store.Store, client *Client, acces
 		}
 	}
 	return nil
+}
+
+func rawListDocumentKey(dataType string, chunk dateChunk, page int) string {
+	return fmt.Sprintf("%s:list:%s:%s:%d", dataType, chunk.Start.Format(dateLayout), chunk.End.Format(dateLayout), page)
 }
 
 func rawFilter(entity rawEntity, start, end time.Time) string {

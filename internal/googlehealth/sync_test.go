@@ -387,6 +387,15 @@ func TestSleepRawDocumentKeyIncludesFullRange(t *testing.T) {
 	}
 }
 
+func TestRawListDocumentKeyIncludesFullRange(t *testing.T) {
+	start, _ := time.Parse(dateLayout, "2026-08-01")
+	shortEnd, _ := time.Parse(dateLayout, "2026-08-10")
+	longEnd, _ := time.Parse(dateLayout, "2026-08-20")
+	if rawListDocumentKey("heart-rate", dateChunk{Start: start, End: shortEnd}, 0) == rawListDocumentKey("heart-rate", dateChunk{Start: start, End: longEnd}, 0) {
+		t.Fatal("raw list keys must differ when the request end date differs")
+	}
+}
+
 func TestGoogleHealthFiltersUseSupportedComparators(t *testing.T) {
 	start, _ := time.Parse(dateLayout, "2026-08-17")
 	end, _ := time.Parse(dateLayout, "2026-08-19")
