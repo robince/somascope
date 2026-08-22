@@ -80,7 +80,7 @@ func (s *Server) handleProviderAuthStart(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.store.SetAppSetting(context.Background(), oauthStateKey(provider), state); err != nil {
+	if err := s.store.SetAppSetting(r.Context(), oauthStateKey(provider), state); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -97,13 +97,13 @@ func (s *Server) handleProviderAuthStart(w http.ResponseWriter, r *http.Request)
 
 	returnTo := firstValidReturnTo(strings.TrimSpace(payload.ReturnTo), appRootFromRedirect(cfg.RedirectURI))
 	if returnTo != "" {
-		if err := s.store.SetAppSetting(context.Background(), oauthReturnToKey(provider), returnTo); err != nil {
+		if err := s.store.SetAppSetting(r.Context(), oauthReturnToKey(provider), returnTo); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 	}
 
-	authorizeURL, err := s.authorizationURL(provider, cfg, state)
+	authorizeURL, err := s.authorizationURL(r.Context(), provider, cfg, state)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -391,7 +391,7 @@ func (s *Server) syncTask(provider string, cfg settings.ProviderConfig, connecti
 	}
 }
 
-func (s *Server) authorizationURL(provider string, cfg settings.ProviderConfig, state string) (string, error) {
+func (s *Server) authorizationURL(ctx context.Context, provider string, cfg settings.ProviderConfig, state string) (string, error) {
 	switch provider {
 	case providerOura:
 		return s.oura.AuthorizationURL(oura.AppConfig{
@@ -405,7 +405,7 @@ func (s *Server) authorizationURL(provider string, cfg settings.ProviderConfig, 
 		if err != nil {
 			return "", err
 		}
-		if err := s.store.SetAppSetting(context.Background(), oauthVerifierKey(provider), verifier); err != nil {
+		if err := s.store.SetAppSetting(ctx, oauthVerifierKey(provider), verifier); err != nil {
 			return "", err
 		}
 		return s.googleHealth.AuthorizationURL(googlehealth.AppConfig{
