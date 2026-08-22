@@ -20,13 +20,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Enable corepack
+        run: corepack enable
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
-      - name: Enable corepack
-        run: corepack enable
       - name: Smoke test current tree
         run: make test
       - name: Release with GoReleaser
