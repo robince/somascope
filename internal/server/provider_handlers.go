@@ -516,6 +516,15 @@ func (s *Server) validateAccountReconnect(ctx context.Context, connection store.
 	}
 	oldID := strings.TrimSpace(existing.ExternalAccountID)
 	newID := strings.TrimSpace(connection.ExternalAccountID)
+	if oldID == "" && newID != "" {
+		hasData, dataErr := s.store.ProviderHasStoredData(ctx, connection.Provider)
+		if dataErr != nil {
+			return fmt.Errorf("inspect existing %s data: %w", providerDisplayName(connection.Provider), dataErr)
+		}
+		if hasData {
+			return fmt.Errorf("this device contains legacy %s data whose account cannot be verified; reset that provider's local data before reconnecting", providerDisplayName(connection.Provider))
+		}
+	}
 	if oldID != "" && newID != "" && oldID != newID {
 		return fmt.Errorf("this device already contains %s data for a different account; reset that provider's local data before connecting another account", providerDisplayName(connection.Provider))
 	}

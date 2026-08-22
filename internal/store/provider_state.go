@@ -347,6 +347,19 @@ func (s *Store) ProviderOverview(ctx context.Context, provider string, configure
 	return out, nil
 }
 
+func (s *Store) ProviderHasStoredData(ctx context.Context, provider string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM raw_documents WHERE provider = ?
+			UNION ALL SELECT 1 FROM daily_records WHERE provider = ?
+			UNION ALL SELECT 1 FROM sleep_sessions WHERE provider = ?
+			UNION ALL SELECT 1 FROM sync_state WHERE provider = ?
+		)
+	`, provider, provider, provider, provider).Scan(&exists)
+	return exists, err
+}
+
 func (s *Store) LatestProviderSyncAt(ctx context.Context, provider string) (string, error) {
 	var syncedAt sql.NullString
 	err := s.db.QueryRowContext(ctx, `

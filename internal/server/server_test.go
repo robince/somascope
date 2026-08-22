@@ -948,6 +948,21 @@ func TestValidateAccountReconnectAllowsSameAccount(t *testing.T) {
 	}
 }
 
+func TestValidateAccountReconnectRejectsLegacyConnectionWithData(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+	if err := srv.store.UpsertConnection(ctx, store.Connection{Provider: providerOura, AccessToken: "legacy", Status: "connected", ConnectedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatalf("seed legacy connection: %v", err)
+	}
+	if err := srv.store.UpsertDailyRecord(ctx, store.DailyRecord{Provider: providerOura, RecordKind: "daily_activity", LocalDate: "2026-08-20", ExternalID: "activity-1", Summary: json.RawMessage(`{"steps":100}`)}); err != nil {
+		t.Fatalf("seed legacy data: %v", err)
+	}
+	err := srv.validateAccountReconnect(ctx, store.Connection{Provider: providerOura, ExternalAccountID: "oura-user-2"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be verified") {
+		t.Fatalf("expected legacy account safety error, got %v", err)
+	}
+}
+
 func TestOuraRecentReturnsDailyRecordsAndSleepSessions(t *testing.T) {
 	srv := newTestServer(t)
 
