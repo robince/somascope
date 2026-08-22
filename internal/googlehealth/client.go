@@ -303,19 +303,19 @@ func (c *Client) DailyRollup(ctx context.Context, accessToken, dataType string, 
 }
 
 func (c *Client) ListDataPoints(ctx context.Context, accessToken, dataType string, params url.Values, retry RetryConfig) ([]ListPage, error) {
-	return c.listPaged(ctx, accessToken, "/users/me/dataTypes/"+dataType+"/dataPoints", params, retry)
+	return c.listPaged(ctx, accessToken, dataType, "/users/me/dataTypes/"+dataType+"/dataPoints", params, retry)
 }
 
 func (c *Client) ReconcileDataPoints(ctx context.Context, accessToken, dataType string, params url.Values, retry RetryConfig) ([]ListPage, error) {
-	return c.listPaged(ctx, accessToken, "/users/me/dataTypes/"+dataType+"/dataPoints:reconcile", params, retry)
+	return c.listPaged(ctx, accessToken, dataType, "/users/me/dataTypes/"+dataType+"/dataPoints:reconcile", params, retry)
 }
 
-func (c *Client) listPaged(ctx context.Context, accessToken, path string, params url.Values, retry RetryConfig) ([]ListPage, error) {
+func (c *Client) listPaged(ctx context.Context, accessToken, dataType, path string, params url.Values, retry RetryConfig) ([]ListPage, error) {
 	var out []ListPage
 	seen := map[string]struct{}{}
 	pageToken := ""
 	for page := 0; page < maxPages; page++ {
-		pageParams := withPageSize(params)
+		pageParams := withPageSize(params, dataType)
 		if pageToken != "" {
 			pageParams.Set("pageToken", pageToken)
 		}
@@ -471,7 +471,7 @@ func (e *APIError) Retriable() bool {
 		e.StatusCode >= http.StatusInternalServerError
 }
 
-func withPageSize(params url.Values) url.Values {
+func withPageSize(params url.Values, dataType string) url.Values {
 	pageParams := url.Values{}
 	for key, values := range params {
 		for _, value := range values {
@@ -479,7 +479,11 @@ func withPageSize(params url.Values) url.Values {
 		}
 	}
 	if strings.TrimSpace(pageParams.Get("pageSize")) == "" {
-		pageParams.Set("pageSize", strconv.Itoa(maxPageSize))
+		pageSize := maxPageSize
+		if dataType == "sleep" || dataType == "exercise" {
+			pageSize = 25
+		}
+		pageParams.Set("pageSize", strconv.Itoa(pageSize))
 	}
 	return pageParams
 }

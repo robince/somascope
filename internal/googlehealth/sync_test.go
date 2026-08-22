@@ -30,6 +30,21 @@ func TestListDataPointsRequestsMaxPageSize(t *testing.T) {
 	}
 }
 
+func TestReconcileDataPointsUsesSleepPageLimit(t *testing.T) {
+	var gotPageSize string
+	client := NewClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotPageSize = req.URL.Query().Get("pageSize")
+		return jsonResponse(`{"dataPoints":[]}`), nil
+	})})
+
+	if _, err := client.ReconcileDataPoints(context.Background(), "token", "sleep", url.Values{}, RetryConfig{MaxAttempts: 1}); err != nil {
+		t.Fatalf("reconcile sleep data points: %v", err)
+	}
+	if gotPageSize != "25" {
+		t.Fatalf("expected pageSize=25, got %q", gotPageSize)
+	}
+}
+
 func TestAuthorizationURLIncludesPKCEAndOfflineAccess(t *testing.T) {
 	client := NewClient(nil)
 	url, err := client.AuthorizationURL(AppConfig{
