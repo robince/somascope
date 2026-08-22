@@ -689,14 +689,21 @@ func archiveRaw(ctx context.Context, st *store.Store, kind, key string, chunk da
 	return st.UpsertRawDocument(ctx, store.RawDocument{
 		Provider:     Provider,
 		DocumentKind: kind,
-		LocalDate:    chunk.Start.Format(dateLayout),
+		LocalDate:    formatChunkDate(chunk.Start),
 		RequestPath:  key,
-		RequestStart: chunk.Start.Format(dateLayout),
-		RequestEnd:   chunk.End.Format(dateLayout),
+		RequestStart: formatChunkDate(chunk.Start),
+		RequestEnd:   formatChunkDate(chunk.End),
 		Payload:      payload,
 		FetchedAt:    fetchedAt,
 		DocumentKey:  key,
 	})
+}
+
+func formatChunkDate(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(dateLayout)
 }
 
 func retryWith(retry RetryConfig, tracker *providersync.Tracker, entity string, chunk dateChunk) RetryConfig {
