@@ -40,7 +40,7 @@ jobs:
       - name: Smoke test current tree
         run: make test
       - name: Release with GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: latest
