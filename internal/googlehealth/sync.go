@@ -450,10 +450,14 @@ func mergeActiveMinutes(summary map[string]any, activeMinutes map[string]any) {
 	if activeMinutes == nil {
 		return
 	}
-	if value := intFromAny(activeMinutes["minutesSum"]); value != nil {
-		summary["medium_activity_minutes"] = *value
-	}
 	levels, _ := activeMinutes["activeMinutesRollupByActivityLevel"].([]any)
+	if len(levels) == 0 {
+		if value := intFromAny(activeMinutes["minutesSum"]); value != nil {
+			summary["total_active_minutes"] = *value
+		}
+		return
+	}
+	highMinutes := 0
 	for _, raw := range levels {
 		level, _ := raw.(map[string]any)
 		if level == nil {
@@ -469,16 +473,12 @@ func mergeActiveMinutes(summary map[string]any, activeMinutes map[string]any) {
 		case "MODERATE":
 			summary["medium_activity_minutes"] = *minutes
 		case "VIGOROUS", "PEAK":
-			summary["high_activity_minutes"] = valueOrZero(summary["high_activity_minutes"]) + *minutes
+			highMinutes += *minutes
 		}
 	}
-}
-
-func valueOrZero(value any) int {
-	if parsed := intFromAny(value); parsed != nil {
-		return *parsed
+	if highMinutes > 0 {
+		summary["high_activity_minutes"] = highMinutes
 	}
-	return 0
 }
 
 func parseDurationSeconds(value string) int {

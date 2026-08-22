@@ -103,6 +103,18 @@ func TestMergeActivityPointReadsLiveGoogleHealthRollupFields(t *testing.T) {
 	}
 }
 
+func TestMergeActiveMinutesDoesNotTreatTotalAsModerate(t *testing.T) {
+	summary := map[string]any{}
+	mergeActiveMinutes(summary, map[string]any{"minutesSum": "47"})
+
+	if _, ok := summary["medium_activity_minutes"]; ok {
+		t.Fatalf("expected no moderate bucket without an activity-level breakdown")
+	}
+	if got := summary["total_active_minutes"]; got != 47 {
+		t.Fatalf("expected total active minutes to be preserved, got %#v", got)
+	}
+}
+
 func TestSleepLocalDateUsesCivilOffsetNotUTC(t *testing.T) {
 	session, ok := sleepSessionFrom(map[string]any{
 		"sleep": map[string]any{
