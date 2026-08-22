@@ -153,7 +153,11 @@ func TestResolveStartDateClampsCursorOverlapToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer st.Close()
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	if err := st.UpsertSyncState(context.Background(), Provider, "daily_activity", "2026-08-22", "2026-08-22T12:00:00Z"); err != nil {
 		t.Fatalf("seed sync state: %v", err)
 	}
@@ -173,7 +177,11 @@ func TestAdvanceSyncStateDoesNotRewindCursor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer st.Close()
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	if err := st.UpsertSyncState(context.Background(), Provider, "daily_activity", "2026-08-22", "2026-08-22T12:00:00Z"); err != nil {
 		t.Fatalf("seed sync state: %v", err)
 	}
