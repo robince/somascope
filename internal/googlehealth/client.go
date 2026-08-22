@@ -315,7 +315,7 @@ func (c *Client) DailyRollup(ctx context.Context, accessToken, dataType string, 
 	body := map[string]any{
 		"range": map[string]any{
 			"start": civilDateTime(start, 0, 0, 0),
-			"end":   civilDateTime(end, 23, 59, 59),
+			"end":   civilDateTime(end.AddDate(0, 0, 1), 0, 0, 0),
 		},
 		"windowSizeDays": 1,
 	}

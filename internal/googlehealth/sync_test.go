@@ -55,6 +55,44 @@ func TestReconcileDataPointsUsesSleepPageLimit(t *testing.T) {
 	}
 }
 
+func TestDailyRollupUsesExclusiveNextDayEnd(t *testing.T) {
+	var requestBody struct {
+		Range struct {
+			End struct {
+				Date struct {
+					Year  int `json:"year"`
+					Month int `json:"month"`
+					Day   int `json:"day"`
+				} `json:"date"`
+				Time struct {
+					Hours   int `json:"hours"`
+					Minutes int `json:"minutes"`
+					Seconds int `json:"seconds"`
+				} `json:"time"`
+			} `json:"end"`
+		} `json:"range"`
+	}
+	client := NewClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(req.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode daily rollup request: %v", err)
+		}
+		return jsonResponse(`{"rollupDataPoints":[]}`), nil
+	})})
+	start, _ := time.Parse(dateLayout, "2026-08-01")
+	end, _ := time.Parse(dateLayout, "2026-08-03")
+	if _, err := client.DailyRollup(context.Background(), "token", "steps", start, end, RetryConfig{MaxAttempts: 1}); err != nil {
+		t.Fatalf("daily rollup: %v", err)
+	}
+	endDate := requestBody.Range.End.Date
+	endTime := requestBody.Range.End.Time
+	if endDate.Year != 2026 || endDate.Month != 8 || endDate.Day != 4 {
+		t.Fatalf("expected exclusive end date 2026-08-04, got %+v", endDate)
+	}
+	if endTime.Hours != 0 || endTime.Minutes != 0 || endTime.Seconds != 0 {
+		t.Fatalf("expected exclusive end at midnight, got %+v", endTime)
+	}
+}
+
 func TestAuthorizationURLIncludesPKCEAndOfflineAccess(t *testing.T) {
 	client := NewClient(nil)
 	url, err := client.AuthorizationURL(AppConfig{
