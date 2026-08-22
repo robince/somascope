@@ -3,6 +3,7 @@ package googlehealth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -248,6 +249,27 @@ func TestAdvanceSyncStateDoesNotRewindCursor(t *testing.T) {
 	}
 	if cursor != "2026-08-22" {
 		t.Fatalf("expected cursor to remain at 2026-08-22, got %q", cursor)
+	}
+}
+
+func TestTokenRefreshRequiresReauthOnlyForTerminalOAuthErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "revoked grant", err: &OAuthTokenError{StatusCode: http.StatusBadRequest, Code: "invalid_grant"}, want: true},
+		{name: "invalid token", err: &OAuthTokenError{StatusCode: http.StatusBadRequest, Code: "invalid_token"}, want: true},
+		{name: "rate limited", err: &OAuthTokenError{StatusCode: http.StatusTooManyRequests, Code: "temporarily_unavailable"}},
+		{name: "server error", err: &OAuthTokenError{StatusCode: http.StatusInternalServerError}},
+		{name: "network error", err: errors.New("connection reset")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tokenRefreshRequiresReauth(tt.err); got != tt.want {
+				t.Fatalf("tokenRefreshRequiresReauth() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
