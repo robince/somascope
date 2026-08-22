@@ -240,7 +240,7 @@ func (c *Client) tokenRequest(ctx context.Context, values url.Values) (TokenBund
 		return TokenBundle{}, err
 	}
 	if resp.StatusCode >= 400 {
-		return TokenBundle{}, fmt.Errorf("google token request failed: %s", strings.TrimSpace(string(body)))
+		return TokenBundle{}, fmt.Errorf("google token request failed: %s", truncate(strings.TrimSpace(string(body)), 512))
 	}
 
 	var payload struct {
