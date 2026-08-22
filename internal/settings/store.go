@@ -201,12 +201,7 @@ func (s *Store) migrateLegacyFitbitCredentials(ctx context.Context) error {
 	}
 
 	migrated := providerToCredential(mustDefaultProvider("google_health"))
-	migrated.ClientID = legacy.ClientID
-	migrated.ClientSecret = legacy.ClientSecret
 	migrated.Notes = firstNonEmpty(legacy.Notes, migrated.Notes)
-	if !isLegacyFitbitRedirect(legacy.RedirectURI) && strings.TrimSpace(legacy.RedirectURI) != "" {
-		migrated.RedirectURI = legacy.RedirectURI
-	}
 	return s.app.UpsertProviderCredential(ctx, migrated)
 }
 
@@ -216,15 +211,6 @@ func mustDefaultProvider(name string) ProviderConfig {
 		return ProviderConfig{Provider: name}
 	}
 	return provider
-}
-
-func isLegacyFitbitRedirect(value string) bool {
-	switch strings.TrimSpace(value) {
-	case "http://localhost:18080/oauth/fitbit/callback", "http://127.0.0.1:18080/oauth/fitbit/callback":
-		return true
-	default:
-		return false
-	}
 }
 
 func firstNonEmpty(values ...string) string {

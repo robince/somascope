@@ -206,11 +206,11 @@ func TestLoadMigratesLegacyFitbitCredentials(t *testing.T) {
 			t.Fatalf("expected leftover fitbit provider to stay out of settings payload")
 		}
 	}
-	if !googleHealth.Configured {
-		t.Fatalf("expected migrated google_health provider to be configured")
+	if googleHealth.Configured {
+		t.Fatalf("expected google_health to remain unconfigured")
 	}
-	if googleHealth.ClientID != "legacy-fitbit-client" {
-		t.Fatalf("unexpected migrated client id: %q", googleHealth.ClientID)
+	if googleHealth.ClientID != "" {
+		t.Fatalf("expected empty google_health client id, got %q", googleHealth.ClientID)
 	}
 	if googleHealth.RedirectURI != "http://localhost:18080/oauth/google_health/callback" {
 		t.Fatalf("expected migrated redirect, got %q", googleHealth.RedirectURI)
@@ -220,7 +220,10 @@ func TestLoadMigratesLegacyFitbitCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load private google_health settings: %v", err)
 	}
-	if private.ClientSecret != "legacy-fitbit-secret" {
-		t.Fatalf("expected migrated secret, got %q", private.ClientSecret)
+	if private.ClientSecret != "" {
+		t.Fatalf("expected empty google_health secret, got %q", private.ClientSecret)
+	}
+	if private.Notes != "legacy note" {
+		t.Fatalf("expected legacy notes to be preserved, got %q", private.Notes)
 	}
 }
