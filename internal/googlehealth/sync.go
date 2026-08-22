@@ -346,6 +346,12 @@ func syncRawArchives(ctx context.Context, st *store.Store, client *Client, acces
 				}
 				return failEntity(tracker, entity.kind, chunk, "list", err)
 			}
+			if entity.query == rawQueryECG {
+				pages, err = filterECGPages(pages, chunk.Start, chunk.End)
+				if err != nil {
+					return failEntity(tracker, entity.kind, chunk, "filter", err)
+				}
+			}
 			rowsWritten := 0
 			for i, page := range pages {
 				if _, err := archiveRaw(ctx, st, entity.kind, fmt.Sprintf("%s:list:%s:%d", entity.dataType, chunk.Start.Format(dateLayout), i), chunk, page.RawBody, fetchedAt); err != nil {
@@ -383,6 +389,33 @@ func rawFilter(entity rawEntity, start, end time.Time) string {
 	default:
 		return ""
 	}
+}
+
+func filterECGPages(pages []ListPage, start, end time.Time) ([]ListPage, error) {
+	upperBound := end.AddDate(0, 0, 1)
+	for pageIndex := range pages {
+		filtered := make([]map[string]any, 0, len(pages[pageIndex].DataPoints))
+		for _, point := range pages[pageIndex].DataPoints {
+			interval := nestedMap(nestedMap(point, "electrocardiogram"), "interval")
+			observedAt, err := parseTimestamp(stringValue(interval["startTime"]))
+			if err != nil || observedAt.Before(start) || !observedAt.Before(upperBound) {
+				continue
+			}
+			filtered = append(filtered, point)
+		}
+		var rawPayload map[string]any
+		if err := json.Unmarshal(pages[pageIndex].RawBody, &rawPayload); err != nil {
+			return nil, fmt.Errorf("decode ECG response for range filtering: %w", err)
+		}
+		rawPayload["dataPoints"] = filtered
+		raw, err := json.Marshal(rawPayload)
+		if err != nil {
+			return nil, fmt.Errorf("encode range-filtered ECG response: %w", err)
+		}
+		pages[pageIndex].DataPoints = filtered
+		pages[pageIndex].RawBody = raw
+	}
+	return pages, nil
 }
 
 func skipRawError(err error) bool {

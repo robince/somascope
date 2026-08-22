@@ -115,6 +115,39 @@ func TestMergeActiveMinutesDoesNotTreatTotalAsModerate(t *testing.T) {
 	}
 }
 
+func TestFilterECGPagesHonorsRequestedEndDate(t *testing.T) {
+	point := func(timestamp string) map[string]any {
+		return map[string]any{"electrocardiogram": map[string]any{"interval": map[string]any{"startTime": timestamp}}}
+	}
+	pages := []ListPage{{
+		DataPoints: []map[string]any{
+			point("2026-08-20T12:00:00Z"),
+			point("2026-08-21T12:00:00Z"),
+			point("2026-08-22T12:00:00Z"),
+		},
+		RawBody: json.RawMessage(`{"dataPoints":[{"electrocardiogram":{"interval":{"startTime":"2026-08-20T12:00:00Z"}}},{"electrocardiogram":{"interval":{"startTime":"2026-08-21T12:00:00Z"}}},{"electrocardiogram":{"interval":{"startTime":"2026-08-22T12:00:00Z"}}}],"nextPageToken":""}`),
+	}}
+
+	start, _ := time.Parse(dateLayout, "2026-08-20")
+	end, _ := time.Parse(dateLayout, "2026-08-21")
+	filtered, err := filterECGPages(pages, start, end)
+	if err != nil {
+		t.Fatalf("filter ECG pages: %v", err)
+	}
+	if got := len(filtered[0].DataPoints); got != 2 {
+		t.Fatalf("expected 2 in-range ECG points, got %d", got)
+	}
+	var raw struct {
+		DataPoints []map[string]any `json:"dataPoints"`
+	}
+	if err := json.Unmarshal(filtered[0].RawBody, &raw); err != nil {
+		t.Fatalf("decode filtered raw payload: %v", err)
+	}
+	if got := len(raw.DataPoints); got != 2 {
+		t.Fatalf("expected raw payload to contain 2 in-range points, got %d", got)
+	}
+}
+
 func TestSleepLocalDateUsesCivilOffsetNotUTC(t *testing.T) {
 	session, ok := sleepSessionFrom(map[string]any{
 		"sleep": map[string]any{
