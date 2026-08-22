@@ -85,10 +85,11 @@
   $: availableSources = (dashboard?.available_sources ?? dashboard?.providers ?? []).filter(
     (provider): provider is ProviderName => provider === "oura" || provider === "google_health"
   );
-  $: if (activeSource !== "all" && availableSources.length && !availableSources.includes(activeSource)) {
-    activeSource = availableSources.length > 1 ? "all" : availableSources[0];
-  }
-  $: selectedProviders = providersForSource(activeSource, availableSources.length ? availableSources : ["oura"]);
+  $: validatedActiveSource =
+    activeSource === "all" || !availableSources.length || availableSources.includes(activeSource)
+      ? activeSource
+      : availableSources.length > 1 ? "all" : availableSources[0];
+  $: selectedProviders = providersForSource(validatedActiveSource, availableSources.length ? availableSources : ["oura"]);
   $: overlayMode = selectedProviders.length > 1;
   $: providerBuckets = selectedProviders.map((provider) => ({
     provider,
@@ -559,9 +560,9 @@
 
     {#if availableSources.length > 1}
       <div class="source-switch" aria-label="Data source">
-        <button class:active={activeSource === "all"} type="button" onclick={() => (activeSource = "all")}>All</button>
+        <button class:active={validatedActiveSource === "all"} type="button" onclick={() => (activeSource = "all")}>All</button>
         {#each availableSources as provider}
-          <button class:active={activeSource === provider} type="button" onclick={() => (activeSource = provider)}>
+          <button class:active={validatedActiveSource === provider} type="button" onclick={() => (activeSource = provider)}>
             {providerLabel(provider)}
           </button>
         {/each}
