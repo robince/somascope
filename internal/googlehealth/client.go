@@ -24,12 +24,15 @@ const (
 	Provider     = "google_health"
 	maxPageSize  = 10000
 	maxPages     = 500
+
+	ActivityReadonlyScope = "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly"
+	SleepReadonlyScope    = "https://www.googleapis.com/auth/googlehealth.sleep.readonly"
 )
 
 func DefaultReadonlyScopes() []string {
 	return []string{
-		"https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
-		"https://www.googleapis.com/auth/googlehealth.sleep.readonly",
+		ActivityReadonlyScope,
+		SleepReadonlyScope,
 		"https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
 		"https://www.googleapis.com/auth/googlehealth.nutrition.readonly",
 		"https://www.googleapis.com/auth/googlehealth.profile.readonly",

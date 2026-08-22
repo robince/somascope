@@ -127,17 +127,23 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 	}
 
 	fetchedAt := time.Now().UTC().Format(time.RFC3339)
+	syncActivity := scopeGranted(activeConnection.Scope, ActivityReadonlyScope)
+	syncSleepData := scopeGranted(activeConnection.Scope, SleepReadonlyScope)
 	retry := RetryConfig{
 		MaxAttempts:        defaultRetryAttempts,
 		OnUnauthorized:     onUnauthorized,
 		CurrentAccessToken: currentAccessToken,
 	}
 
-	if err := syncDailyActivity(ctx, st, syncClient, activeConnection.AccessToken, dailyStart, endDate, fetchedAt, tracker, retry); err != nil {
-		return err
+	if syncActivity {
+		if err := syncDailyActivity(ctx, st, syncClient, activeConnection.AccessToken, dailyStart, endDate, fetchedAt, tracker, retry); err != nil {
+			return err
+		}
 	}
-	if err := syncSleep(ctx, st, syncClient, activeConnection.AccessToken, sleepStart, endDate, fetchedAt, tracker, retry); err != nil {
-		return err
+	if syncSleepData {
+		if err := syncSleep(ctx, st, syncClient, activeConnection.AccessToken, sleepStart, endDate, fetchedAt, tracker, retry); err != nil {
+			return err
+		}
 	}
 	if err := syncSnapshots(ctx, st, syncClient, activeConnection.AccessToken, fetchedAt, tracker, retry); err != nil {
 		return err
@@ -146,6 +152,18 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 		return err
 	}
 	return nil
+}
+
+func scopeGranted(grantedScopes, requiredScope string) bool {
+	if strings.TrimSpace(grantedScopes) == "" {
+		return true
+	}
+	for _, scope := range strings.Fields(grantedScopes) {
+		if scope == requiredScope {
+			return true
+		}
+	}
+	return false
 }
 
 func syncDailyActivity(ctx context.Context, st *store.Store, client *Client, accessToken string, start, end time.Time, fetchedAt string, tracker *providersync.Tracker, retry RetryConfig) error {

@@ -78,6 +78,23 @@ func TestAuthorizationURLIncludesPKCEAndOfflineAccess(t *testing.T) {
 	}
 }
 
+func TestScopeGrantedHandlesPartialAndLegacyGrants(t *testing.T) {
+	if !scopeGranted("", ActivityReadonlyScope) {
+		t.Fatal("empty legacy scope metadata should retain existing request behavior")
+	}
+	activityOnly := ActivityReadonlyScope
+	if !scopeGranted(activityOnly, ActivityReadonlyScope) {
+		t.Fatal("expected activity scope to be granted")
+	}
+	if scopeGranted(activityOnly, SleepReadonlyScope) {
+		t.Fatal("activity-only grant must not enable sleep import")
+	}
+	both := ActivityReadonlyScope + " " + SleepReadonlyScope
+	if !scopeGranted(both, ActivityReadonlyScope) || !scopeGranted(both, SleepReadonlyScope) {
+		t.Fatal("expected both requested core scopes to be granted")
+	}
+}
+
 func TestMergeActivityPointReadsLiveGoogleHealthRollupFields(t *testing.T) {
 	summary := map[string]any{"day": "2026-08-18"}
 	mergeActivityPoint(summary, "distance", map[string]any{
