@@ -10,7 +10,6 @@
   export let userTimezone = "";
   export let loading = false;
   export let statusLoading = false;
-  export let statusError = "";
   export let statusErrors: Partial<Record<ProviderName, string>> = {};
   export let saving = false;
   export let syncStartDate = "";

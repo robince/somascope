@@ -641,7 +641,6 @@
       {userTimezone}
       loading={settingsLoading}
       {statusLoading}
-      statusError={statusError}
       statusErrors={providerStatusErrors}
       {saving}
       {syncStartDate}
