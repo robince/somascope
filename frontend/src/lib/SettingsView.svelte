@@ -485,7 +485,7 @@
               {:else if !provider.configured}
                 <p class="status-copy warning">Save your local client ID and secret before connecting.</p>
               {:else if status?.status === "needs_reauth"}
-                <p class="status-copy warning">The Google token expired or was revoked. Reconnect to continue syncing.</p>
+                <p class="status-copy warning">The {providerLabel(provider.provider)} token expired or was revoked. Reconnect to continue syncing.</p>
               {:else if !status?.connected}
                 <p class="status-copy warning">Credentials are saved locally. Use Connect to finish authentication.</p>
               {/if}
