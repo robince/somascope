@@ -78,6 +78,7 @@ func Sync(ctx context.Context, st *store.Store, client *Client, cfg AppConfig, c
 			return activeConnection.AccessToken, nil
 		}
 		if activeConnection.RefreshToken == "" {
+			_ = markNeedsReauth(ctx, st, activeConnection)
 			return "", fmt.Errorf("no refresh token available")
 		}
 		refreshed, err := client.RefreshToken(ctx, cfg, activeConnection.RefreshToken)
