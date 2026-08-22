@@ -851,6 +851,9 @@ func TestOuraCallbackRedirectsBackToReturnTo(t *testing.T) {
 			if req.URL.Host == "api.ouraring.com" && req.URL.Path == "/oauth/token" {
 				return jsonResponse(http.StatusOK, `{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600,"scope":"email personal daily"}`), nil
 			}
+			if req.URL.Host == "api.ouraring.com" && req.URL.Path == "/v2/usercollection/personal_info" {
+				return jsonResponse(http.StatusOK, `{"id":"oura-user-1","email":"user@example.com"}`), nil
+			}
 			return jsonResponse(http.StatusNotFound, `{"error":"not found"}`), nil
 		}),
 	})
@@ -893,6 +896,55 @@ func TestOuraCallbackRedirectsBackToReturnTo(t *testing.T) {
 	}
 	if got := rec.Header().Get("Location"); got != "http://localhost:5173/?oauth_provider=oura&oauth_status=connected" {
 		t.Fatalf("unexpected redirect location %q", got)
+	}
+}
+
+func TestValidateAccountReconnectRejectsDifferentAccount(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+	if err := srv.store.UpsertConnection(ctx, store.Connection{
+		Provider:          providerGoogleHealth,
+		ExternalAccountID: "health-user-a",
+		AccessToken:       "access-a",
+		Status:            "connected",
+		ConnectedAt:       time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+
+	err := srv.validateAccountReconnect(ctx, store.Connection{
+		Provider:          providerGoogleHealth,
+		ExternalAccountID: "health-user-b",
+	})
+	if err == nil || !strings.Contains(err.Error(), "different account") {
+		t.Fatalf("expected account mismatch error, got %v", err)
+	}
+	existing, loadErr := srv.store.ConnectionByProvider(ctx, providerGoogleHealth)
+	if loadErr != nil {
+		t.Fatalf("reload connection: %v", loadErr)
+	}
+	if existing.ExternalAccountID != "health-user-a" {
+		t.Fatalf("expected existing account to remain unchanged, got %q", existing.ExternalAccountID)
+	}
+}
+
+func TestValidateAccountReconnectAllowsSameAccount(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+	if err := srv.store.UpsertConnection(ctx, store.Connection{
+		Provider:          providerOura,
+		ExternalAccountID: "oura-user-1",
+		AccessToken:       "old-access",
+		Status:            "connected",
+		ConnectedAt:       time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+	if err := srv.validateAccountReconnect(ctx, store.Connection{
+		Provider:          providerOura,
+		ExternalAccountID: "oura-user-1",
+	}); err != nil {
+		t.Fatalf("same-account reconnect should be allowed: %v", err)
 	}
 }
 

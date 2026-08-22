@@ -156,6 +156,10 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 		writeOAuthHTML(w, providerDisplayName(provider)+" authorization failed", templateEscape(err.Error()))
 		return
 	}
+	if err := s.validateAccountReconnect(r.Context(), connection); err != nil {
+		writeOAuthHTML(w, providerDisplayName(provider)+" authorization failed", templateEscape(err.Error()))
+		return
+	}
 
 	if err := s.store.UpsertConnection(r.Context(), connection); err != nil {
 		http.Error(w, "failed to save connection", http.StatusInternalServerError)
@@ -431,18 +435,27 @@ func (s *Server) completeProviderAuth(ctx context.Context, provider string, cfg 
 		if err != nil {
 			return store.Connection{}, err
 		}
+		personalInfo, err := s.oura.FetchDocument(ctx, bundle.AccessToken, "/v2/usercollection/personal_info", oura.RetryConfig{MaxAttempts: 2})
+		if err != nil {
+			return store.Connection{}, fmt.Errorf("read Oura account identity: %w", err)
+		}
+		externalAccountID, _ := personalInfo["id"].(string)
+		if strings.TrimSpace(externalAccountID) == "" {
+			return store.Connection{}, fmt.Errorf("Oura account identity response did not include an id")
+		}
 		expiresAt := ""
 		if !bundle.ExpiresAt.IsZero() {
 			expiresAt = bundle.ExpiresAt.UTC().Format(time.RFC3339)
 		}
 		return store.Connection{
-			Provider:       providerOura,
-			AccessToken:    bundle.AccessToken,
-			RefreshToken:   bundle.RefreshToken,
-			TokenExpiresAt: expiresAt,
-			Scope:          bundle.Scope,
-			Status:         "connected",
-			ConnectedAt:    now,
+			Provider:          providerOura,
+			ExternalAccountID: externalAccountID,
+			AccessToken:       bundle.AccessToken,
+			RefreshToken:      bundle.RefreshToken,
+			TokenExpiresAt:    expiresAt,
+			Scope:             bundle.Scope,
+			Status:            "connected",
+			ConnectedAt:       now,
 		}, nil
 	case providerGoogleHealth:
 		verifier, err := s.store.AppSetting(ctx, oauthVerifierKey(provider))
@@ -482,6 +495,22 @@ func (s *Server) completeProviderAuth(ctx context.Context, provider string, cfg 
 	default:
 		return store.Connection{}, fmt.Errorf("unknown provider %q", provider)
 	}
+}
+
+func (s *Server) validateAccountReconnect(ctx context.Context, connection store.Connection) error {
+	existing, err := s.store.ConnectionByProvider(ctx, connection.Provider)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read existing %s connection: %w", providerDisplayName(connection.Provider), err)
+	}
+	oldID := strings.TrimSpace(existing.ExternalAccountID)
+	newID := strings.TrimSpace(connection.ExternalAccountID)
+	if oldID != "" && newID != "" && oldID != newID {
+		return fmt.Errorf("this device already contains %s data for a different account; reset that provider's local data before connecting another account", providerDisplayName(connection.Provider))
+	}
+	return nil
 }
 
 func (s *Server) providerStatus(ctx context.Context, provider string) (map[string]any, error) {
