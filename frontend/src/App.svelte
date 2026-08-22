@@ -512,7 +512,7 @@
         throw new Error(payload?.error || "Failed to start provider sync.");
       }
 
-      for (const item of payload?.started ?? []) {
+      for (const item of [...(payload?.started ?? []), ...(payload?.already_running ?? [])]) {
         if (item.provider && item.run) {
           applyProviderStatus({
             ...(providerStatus[item.provider as ProviderName] ?? {
