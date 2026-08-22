@@ -278,7 +278,6 @@ func syncSnapshots(ctx context.Context, st *store.Store, client *Client, accessT
 		return err
 	}
 	chunk := dateChunk{}
-	rowsWritten := 0
 	for _, item := range snapshots {
 		if err := tracker.StartChunk("snapshots", item.kind, ""); err != nil {
 			return err
@@ -297,13 +296,11 @@ func syncSnapshots(ctx context.Context, st *store.Store, client *Client, accessT
 		if _, err := archiveRaw(ctx, st, item.kind, item.kind, chunk, raw, fetchedAt); err != nil {
 			return err
 		}
-		rowsWritten++
 		if err := tracker.CompleteChunk("snapshots", item.kind, 1); err != nil {
 			return err
 		}
 	}
 	_ = st.UpsertSyncState(ctx, Provider, "snapshots", fetchedAt, fetchedAt)
-	_ = rowsWritten
 	return tracker.CompleteEntity("snapshots")
 }
 
